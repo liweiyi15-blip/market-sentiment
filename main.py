@@ -6,18 +6,17 @@ import matplotlib.pyplot as plt
 import matplotlib.dates as mdates
 from io import BytesIO
 from datetime import datetime, timezone, timedelta
-from pytz import timezone as pytz_timezone  # pip install pytz 如果需要
+from pytz import timezone as pytz_timezone
 
-# 配置
-WEBHOOK_URL = "YOUR_DISCORD_WEBHOOK_URL_HERE"  # 替换为你的Discord Webhook URL
-FMP_API_KEY = "your_fmp_api_key_here"  # 从FMP dashboard获取并替换
+# 配置（用环境变量替换，Railway会注入）
+WEBHOOK_URL = "YOUR_DISCORD_WEBHOOK_URL_HERE"  # Railway Variables中设置
+FMP_API_KEY = "your_fmp_api_key_here"  # Railway Variables中设置
 HISTORY_DAYS = 30  # 图表显示最近30天
-UPDATE_HOUR = "00"  # 每小时整点 (HH, 如"00" for 00:00, 但用schedule.every().hour.do() 简化)
 
 def get_fear_greed_history(days=HISTORY_DAYS):
     """获取CNN Fear & Greed最近days天历史"""
     today = datetime.now(timezone.utc).date()
-    start_date = today - timedelta(days=days*2)  # 多取点防缺失
+    start_date = today - timedelta(days=days*2)
     url = f"https://production.dataviz.cnn.io/index/fearandgreed/graphdata/{today}"
     try:
         response = requests.get(url)
@@ -25,9 +24,9 @@ def get_fear_greed_history(days=HISTORY_DAYS):
         historical = data['fear_and_greed_historical']['data']
         df = pd.DataFrame(historical)
         df['date'] = pd.to_datetime(df['x'], unit='ms').dt.date
-        df = df[df['date'] >= start_date].tail(days)  # 最近days天
+        df = df[df['date'] >= start_date].tail(days)
         df = df.sort_values('date').set_index('date')
-        return df['y']  # score
+        return df['y']
     except Exception as e:
         print(f"获取Fear & Greed历史失败: {e}")
         return pd.Series()
@@ -46,7 +45,7 @@ def get_sp500_tickers():
 def get_historical_prices(symbol, days=HISTORY_DAYS * 2):
     """从FMP获取单个股票最近days天历史价格"""
     end_date = datetime.now().strftime('%Y-%m-%d')
-    start_date = (datetime.now() - timedelta(days=days + 50)).strftime('%Y-%m-%d')  # 多取50天防SMA
+    start_date = (datetime.now() - timedelta(days=days + 50)).strftime('%Y-%m-%d')
     url = f"https://financialmodelingprep.com/api/v3/historical-price-full/{symbol}?from={start_date}&to={end_date}&apikey={FMP_API_KEY}"
     try:
         response = requests.get(url)
@@ -62,20 +61,20 @@ def get_historical_prices(symbol, days=HISTORY_DAYS * 2):
         return pd.Series()
 
 def calculate_market_participation_history(tickers, days=HISTORY_DAYS):
-    """计算最近days天高于20日/50日SMA的百分比历史"""
-    dates = pd.date_range(end=datetime.now().date(), periods=days, freq='D')[:-1]  # 最近days-1个交易日
+    """计算最近days天高于20日/50日SMA的百分比历史（测试用前50只股票，实际可全开）"""
+    dates = pd.date_range(end=datetime.now().date(), periods=days, freq='D')[:-1]
     participation_20 = pd.Series(index=dates, dtype=float)
     participation_50 = pd.Series(index=dates, dtype=float)
     
+    tickers_sample = tickers[:50]  # 限50只防慢，生产去掉[:50]
     for date in dates:
-        # 为每个历史日期计算 (需历史价格到date+50天)
         hist_days_needed = 50 + (datetime.now() - date).days
         above_20, above_50, total = 0, 0, 0
-        for ticker in tickers[:100]:  # 测试用前100只，实际全用但慢；或缓存
+        for ticker in tickers_sample:
             closes = get_historical_prices(ticker, hist_days_needed)
-            if len(closes) < 50 or closes.index[-1].date() < date:
+            if len(closes) < 50 or closes.index[-1].date() < date.date():
                 continue
-            df_up_to_date = closes[closes.index.date <= date]
+            df_up_to_date = closes[closes.index.date <= date.date()]
             if len(df_up_to_date) < 50:
                 continue
             close = df_up_to_date.iloc[-1]
@@ -88,14 +87,15 @@ def calculate_market_participation_history(tickers, days=HISTORY_DAYS):
                 if close > sma50:
                     above_50 += 1
         if total > 0:
-            participation_20[date] = (above_20 / total) * 100
-            participation_50[date] = (above_50 / total) * 100
+            participation_20[date.date()] = (above_20 / total) * 100
+            participation_50[date.date()] = (above_50 / total) * 100
         time.sleep(0.05)  # 限流
     
     return participation_20, participation_50
 
 def create_charts(fg_series, part20, part50):
-    """生成图表并返回BytesIO图像"""
+    """生成图表"""
+    plt.style.use('dark_background')  # 黑背景匹配你的截图
     fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(10, 8))
     
     # 上图：市场参与度
@@ -143,21 +143,18 @@ def job():
     now = datetime.now(pytz_timezone('US/Eastern'))
     print(f"执行时间: {now}")
     
-    # 获取数据
     fg_series = get_fear_greed_history()
     tickers = get_sp500_tickers()
     print(f"处理 {len(tickers)} 只股票的历史...")
     part20, part50 = calculate_market_participation_history(tickers)
     
     if len(fg_series) > 0 and len(part20) > 0:
-        # 生成图表
         image_buf = create_charts(fg_series, part20, part50)
-        # 发送
         send_chart_to_discord(image_buf)
     else:
         print("数据不足，跳过发送")
 
-# 定时调度：每小时运行 (美东时间)
+# 定时调度：每小时运行
 schedule.every().hour.do(job)
 
 # 运行循环
