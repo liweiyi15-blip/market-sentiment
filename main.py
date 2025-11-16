@@ -11,11 +11,11 @@ import os
 import json
 import time
 import asyncio
-import yfinance as yf  # 新增：S&P 500数据
+import yfinance as yf  # S&P 500数据替代FMP
 
 # 配置（从环境变量读）
 BOT_TOKEN = os.getenv('BOT_TOKEN')
-FMP_API_KEY = os.getenv('FMP_API_KEY')  # 保留，但不用于ticker/price
+FMP_API_KEY = os.getenv('FMP_API_KEY')  # 保留，但不使用
 HISTORY_DAYS = 30
 MESSAGE_FILE = 'last_message_id.json'
 
@@ -23,7 +23,7 @@ MESSAGE_FILE = 'last_message_id.json'
 MARKET_OPEN = "09:30"  # 开盘
 MARKET_CLOSE = "16:00"  # 收盘
 
-# CNN User-Agent header（绕418）
+# CNN User-Agent header（绕418 bot检测）
 CNN_HEADERS = {
     'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'
 }
@@ -238,8 +238,8 @@ async def send_update():
         print(f"自动更新失败: {e}")
 
 def get_fear_greed_history(days=HISTORY_DAYS):
-    # 回退最多14天找数据（避未来/周末）
-    for attempt in range(14):
+    # 回退最多30天找数据（避未来/周末）
+    for attempt in range(30):
         today = datetime.now(timezone.utc).date() - timedelta(days=attempt)
         start_date = today - timedelta(days=days*2)
         url = f"https://production.dataviz.cnn.io/index/fearandgreed/graphdata/{today}"
@@ -265,20 +265,21 @@ def get_fear_greed_history(days=HISTORY_DAYS):
     return pd.Series()
 
 def get_sp500_tickers():
-    # yfinance: 拉S&P 500 tickers
+    # yfinance: 用Wikipedia动态拉S&P 500列表（可靠，无KEY）
     try:
-        sp500 = yf.Ticker("^GSPC")  # S&P 500 index
-        # yfinance 无直接constituents， fallback到Wikipedia或静态
-        # 临时用静态列表（真实部署可动态Wikipedia）
-        # 实际: from wikipedia import wikipedia; wikipedia.set_lang('en'); page = wikipedia.page('List of S&P 500 companies'); df = pd.read_html(page.content)[0]
-        # 但为简单，用yfinance拉指数成分（或预定义）
-        # 模拟: 返回示例列表，实际用全
-        tickers = ['AAPL', 'MSFT', 'GOOGL', 'AMZN', 'TSLA']  # 测试；实际替换为全500
-        print(f"yfinance S&P列表成功，{len(tickers)}只股票")
-        return tickers
+        import wikipedia
+        wikipedia.set_lang('en')
+        page = wikipedia.page('List of S&P 500 companies')
+        df = pd.read_html(page.content)[0]
+        tickers = df['Symbol'].tolist()
+        # yfinance格式：替换.为-
+        tickers = [t.replace('.', '-') for t in tickers]
+        print(f"Wikipedia yfinance S&P列表成功，{len(tickers)}只股票")
+        return tickers[:50]  # 限50防慢，生产可全
     except Exception as e:
         print(f"yfinance S&P列表错误: {e}")
-        return []
+        # fallback静态示例
+        return ['AAPL', 'MSFT', 'GOOGL', 'AMZN', 'TSLA']
 
 def get_historical_prices(symbol, days=HISTORY_DAYS * 2):
     try:
