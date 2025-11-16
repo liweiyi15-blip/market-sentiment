@@ -11,13 +11,11 @@ import os
 import json
 import time
 import asyncio
-import yfinance as yf  # S&P 500数据
 import warnings  # 抑制FutureWarning
 warnings.filterwarnings("ignore", category=FutureWarning)
 
 # 配置（从环境变量读）
 BOT_TOKEN = os.getenv('BOT_TOKEN')
-FMP_API_KEY = os.getenv('FMP_API_KEY')  # 保留，但不使用
 HISTORY_DAYS = 30
 MESSAGE_FILE = 'last_message_id.json'
 
@@ -36,9 +34,6 @@ if not BOT_TOKEN or len(BOT_TOKEN) < 50:
     print("ERROR: BOT_TOKEN无效！检查Railway Variables并重置Discord token。")
     exit(1)
 
-if not FMP_API_KEY:
-    print("WARNING: FMP_API_KEY未设置，FMP数据将跳过（用yfinance替代）。")
-
 # Bot设置
 intents = discord.Intents.default()
 intents.message_content = True
@@ -51,17 +46,8 @@ from discord import app_commands
 last_message = None
 channel = None
 
-# 静态S&P 500 tickers (前50只，避wikipedia依赖；生产可扩展全503)
-SP500_TICKERS = [
-    'AAPL', 'MSFT', 'GOOGL', 'AMZN', 'NVDA', 'META', 'TSLA', 'BRK-B', 'UNH', 'XOM',
-    'JNJ', 'V', 'PG', 'JPM', 'MA', 'HD', 'AVGO', 'CVX', 'LLY', 'ABBV',
-    'PFE', 'KO', 'BAC', 'ADBE', 'COST', 'CRM', 'NFLX', 'ACN', 'WMT', 'TMO',
-    'MRK', 'ABT', 'DIS', 'DHR', 'VZ', 'TXN', 'NEE', 'WFC', 'PM', 'ORCL',
-    'CSCO', 'INTC', 'IBM', 'NOW', 'AMGN', 'CAT', 'GS', 'RTX', 'UNP', 'HON'
-]
-
 # 定义slash命令
-@app_commands.command(name="update", description="手动更新市场图表（立即测试）")
+@app_commands.command(name="update", description="手动更新贪婪恐慌指数图表（立即测试）")
 async def update(interaction: discord.Interaction):
     print(f"/update 触发: {interaction.user} 在 {interaction.channel.name} (服务器: {interaction.guild.name})")
     await interaction.response.defer(ephemeral=True)  # 延迟响应
@@ -74,33 +60,23 @@ async def update(interaction: discord.Interaction):
     now = datetime.now(pytz_timezone('US/Eastern'))
     print(f"手动更新执行: {now} (由 {interaction.user} 触发)")
     
-    # 数据获取
+    # 数据获取（只Fear & Greed）
     fg_series = get_fear_greed_history()
-    tickers = get_sp500_tickers()  # 静态
-    print(f"股票数: {len(tickers)}")
-    part20, part50 = calculate_market_participation_history(tickers)
     
     # 即使数据不足，也发文本摘要
-    embed = discord.Embed(title=f"市场更新 - {now.strftime('%Y-%m-%d %H:%M')} ET", color=0x00ff00)
-    embed.add_field(name="来源", value="CNN & yfinance", inline=False)
+    embed = discord.Embed(title=f"贪婪恐慌指数更新 - {now.strftime('%Y-%m-%d %H:%M')} ET", color=0x00ff00)
+    embed.add_field(name="来源", value="CNN", inline=False)
     
     if len(fg_series) > 0:
         latest_fg = fg_series.iloc[-1]
-        embed.add_field(name="Fear & Greed 当前", value=f"{latest_fg:.0f}", inline=True)
+        embed.add_field(name="当前指数", value=f"{latest_fg:.0f}", inline=True)
     else:
-        embed.add_field(name="Fear & Greed", value="数据暂不可用", inline=True)
-    
-    if len(part20) > 0:
-        latest_20 = part20.iloc[-1]
-        latest_50 = part50.iloc[-1]
-        embed.add_field(name="参与度 (20/50日SMA)", value=f"{latest_20:.1f}% / {latest_50:.1f}%", inline=True)
-    else:
-        embed.add_field(name="参与度", value="数据暂不可用", inline=True)
+        embed.add_field(name="贪婪恐慌指数", value="数据暂不可用", inline=True)
     
     try:
-        if len(fg_series) > 0 and len(part20) > 0:
-            image_buf = create_charts(fg_series, part20, part50)
-            file = discord.File(image_buf, filename='market_update.png')
+        if len(fg_series) > 0:
+            image_buf = create_charts(fg_series)
+            file = discord.File(image_buf, filename='fear_greed_update.png')
             if last_message:
                 await last_message.edit(embed=embed, attachments=[file])
             else:
@@ -119,7 +95,7 @@ async def update(interaction: discord.Interaction):
                 with open(MESSAGE_FILE, 'w') as f:
                     json.dump({'message_id': new_msg.id}, f)
             print("文本摘要发送成功")
-        await interaction.followup.send("更新完成！查看频道（即使数据不足，也发摘要）。", ephemeral=True)
+        await interaction.followup.send("更新完成！查看频道。", ephemeral=True)
     except Exception as e:
         print(f"发送失败: {e}")
         await interaction.followup.send(f"更新失败: {e} (检查bot权限)", ephemeral=True)
@@ -201,32 +177,23 @@ async def send_update():
     # 在交易时间内，执行更新
     print(f"交易时间内自动更新: {now}")
     
-    # 数据获取
+    # 数据获取（只Fear & Greed）
     fg_series = get_fear_greed_history()
-    tickers = get_sp500_tickers()  # 静态
-    part20, part50 = calculate_market_participation_history(tickers)
     
     # 即使数据不足，也发文本摘要
-    embed = discord.Embed(title=f"市场更新 - {now.strftime('%Y-%m-%d %H:%M')} ET", color=0x00ff00)
-    embed.add_field(name="来源", value="CNN & yfinance", inline=False)
+    embed = discord.Embed(title=f"贪婪恐慌指数更新 - {now.strftime('%Y-%m-%d %H:%M')} ET", color=0x00ff00)
+    embed.add_field(name="来源", value="CNN", inline=False)
     
     if len(fg_series) > 0:
         latest_fg = fg_series.iloc[-1]
-        embed.add_field(name="Fear & Greed 当前", value=f"{latest_fg:.0f}", inline=True)
+        embed.add_field(name="当前指数", value=f"{latest_fg:.0f}", inline=True)
     else:
-        embed.add_field(name="Fear & Greed", value="数据暂不可用", inline=True)
-    
-    if len(part20) > 0:
-        latest_20 = part20.iloc[-1]
-        latest_50 = part50.iloc[-1]
-        embed.add_field(name="参与度 (20/50日SMA)", value=f"{latest_20:.1f}% / {latest_50:.1f}%", inline=True)
-    else:
-        embed.add_field(name="参与度", value="数据暂不可用", inline=True)
+        embed.add_field(name="贪婪恐慌指数", value="数据暂不可用", inline=True)
     
     try:
-        if len(fg_series) > 0 and len(part20) > 0:
-            image_buf = create_charts(fg_series, part20, part50)
-            file = discord.File(image_buf, filename='market_update.png')
+        if len(fg_series) > 0:
+            image_buf = create_charts(fg_series)
+            file = discord.File(image_buf, filename='fear_greed_update.png')
             if last_message:
                 await last_message.edit(embed=embed, attachments=[file])
             else:
@@ -275,89 +242,18 @@ def get_fear_greed_history(days=HISTORY_DAYS):
     print("F&G所有尝试失败")
     return pd.Series()
 
-def get_sp500_tickers():
-    # 静态S&P 500 tickers (前50只，避依赖；全503可扩展)
-    tickers = [
-        'AAPL', 'MSFT', 'GOOGL', 'AMZN', 'NVDA', 'META', 'TSLA', 'BRK-B', 'UNH', 'XOM',
-        'JNJ', 'V', 'PG', 'JPM', 'MA', 'HD', 'AVGO', 'CVX', 'LLY', 'ABBV',
-        'PFE', 'KO', 'BAC', 'ADBE', 'COST', 'CRM', 'NFLX', 'ACN', 'WMT', 'TMO',
-        'MRK', 'ABT', 'DIS', 'DHR', 'VZ', 'TXN', 'NEE', 'WFC', 'PM', 'ORCL',
-        'CSCO', 'INTC', 'IBM', 'NOW', 'AMGN', 'CAT', 'GS', 'RTX', 'UNP', 'HON'
-    ]
-    print(f"静态 S&P列表成功，{len(tickers)}只股票")
-    return tickers
-
-def get_historical_prices(symbol, days=HISTORY_DAYS * 2):
-    try:
-        # yfinance拉历史价格
-        end_date = datetime.now()
-        start_date = end_date - timedelta(days=days + 50)
-        df = yf.download(symbol, start=start_date, end=end_date, progress=False)['Close']
-        df.index = pd.to_datetime(df.index)
-        print(f"yfinance {symbol} 价格成功，{len(df)}天")
-        return df
-    except Exception as e:
-        print(f"{symbol}价格错误: {e}")
-        return pd.Series()
-
-def calculate_market_participation_history(tickers, days=HISTORY_DAYS):
-    if not tickers:
-        print("无股票列表，参与度为空")
-        empty_series = pd.Series(index=pd.date_range(end=datetime.now().date(), periods=days, freq='D')[:-1], dtype=float)
-        return empty_series, empty_series
-    
-    dates = pd.date_range(end=datetime.now().date(), periods=days, freq='D')[:-1]
-    participation_20 = pd.Series(index=dates, dtype=float)
-    participation_50 = pd.Series(index=dates, dtype=float)
-    
-    tickers_sample = tickers[:50]  # 限50防慢
-    for date in dates:
-        hist_days_needed = 50 + (datetime.now() - date).days
-        above_20, above_50, total = 0, 0, 0
-        for ticker in tickers_sample:
-            closes = get_historical_prices(ticker, hist_days_needed)
-            if len(closes) < 50 or closes.index[-1].date() < date.date():
-                continue
-            df_up_to_date = closes[closes.index.date <= date.date()]
-            if len(df_up_to_date) < 50:
-                continue
-            close = df_up_to_date.iloc[-1].item()  # 修复: .item() 确保标量
-            sma20 = df_up_to_date.rolling(20).mean().iloc[-1].item()
-            sma50 = df_up_to_date.rolling(50).mean().iloc[-1].item()
-            if not pd.isna(close) and not pd.isna(sma20) and not pd.isna(sma50):
-                total += 1
-                if close > sma20:
-                    above_20 += 1
-                if close > sma50:
-                    above_50 += 1
-        if total > 0:
-            participation_20[date.date()] = (above_20 / total) * 100
-            participation_50[date.date()] = (above_50 / total) * 100
-        time.sleep(0.05)
-    
-    return participation_20, participation_50
-
-def create_charts(fg_series, part20, part50):
+def create_charts(fg_series):
     plt.style.use('dark_background')
-    fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(10, 8))
+    fig, ax = plt.subplots(1, 1, figsize=(10, 4))
     
-    ax1.plot(part20.index, part20.values, 'r-', label='高于20日SMA', linewidth=1.5)
-    ax1.plot(part50.index, part50.values, 'b-', label='高于50日SMA', linewidth=1.5)
-    ax1.set_title('S&P 500 市场参与度 (最近30天)')
-    ax1.set_ylabel('百分比 (%)')
-    ax1.legend()
-    ax1.grid(True, alpha=0.3)
-    ax1.xaxis.set_major_formatter(mdates.DateFormatter('%m/%d'))
-    ax1.tick_params(axis='x', rotation=45)
-    
-    ax2.plot(fg_series.index, fg_series.values, 'orange', label='CNN Fear & Greed Index', linewidth=1.5)
-    ax2.set_title('CNN 恐慌与贪婪指数 (最近30天)')
-    ax2.set_ylabel('指数 (0-100)')
-    ax2.set_xlabel('日期')
-    ax2.legend()
-    ax2.grid(True, alpha=0.3)
-    ax2.xaxis.set_major_formatter(mdates.DateFormatter('%m/%d'))
-    ax2.tick_params(axis='x', rotation=45)
+    ax.plot(fg_series.index, fg_series.values, 'orange', label='CNN Fear & Greed Index', linewidth=1.5)
+    ax.set_title('CNN 恐慌与贪婪指数 (最近30天)')
+    ax.set_ylabel('指数 (0-100)')
+    ax.set_xlabel('日期')
+    ax.legend()
+    ax.grid(True, alpha=0.3)
+    ax.xaxis.set_major_formatter(mdates.DateFormatter('%m/%d'))
+    ax.tick_params(axis='x', rotation=45)
     
     plt.tight_layout()
     buf = BytesIO()
