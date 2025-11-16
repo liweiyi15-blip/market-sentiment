@@ -43,59 +43,10 @@ from discord import app_commands
 last_message = None
 channel = None
 
-@bot.event
-async def on_ready():
-    global channel, last_message
-    print(f'{bot.user} 已上线！ID: {bot.user.id}')
-    
-    # 获取频道
-    guild = bot.guilds[0]
-    channel = discord.utils.get(guild.text_channels, name='general')
-    if not channel:
-        channel = guild.text_channels[0]
-    print(f"目标频道: {channel.name} (ID: {channel.id})")
-    
-    # 加载旧消息
-    try:
-        if os.path.exists(MESSAGE_FILE):
-            with open(MESSAGE_FILE, 'r') as f:
-                data = json.load(f)
-                msg_id = int(data['message_id'])
-                last_message = await channel.fetch_message(msg_id)
-                print(f"加载旧消息: {msg_id}")
-    except Exception as e:
-        print(f"加载旧消息失败: {e}")
-        last_message = None
-    
-    # 同步slash commands（加重试）
-    for attempt in range(3):
-        try:
-            synced = await bot.tree.sync(guild=guild)
-            print(f"Slash commands synced: {len(synced)} (尝试 {attempt+1})")
-            break
-        except Exception as e:
-            print(f"Sync error (尝试 {attempt+1}): {e}")
-            await asyncio.sleep(5)  # 等5s重试
-    
-    # 启动定时任务
-    send_update.start()
-    print("定时任务启动：交易时间内每小时更新。")
-
-# 传统命令
-@bot.command(name='ping')
-async def ping(ctx):
-    await ctx.send('Pong! Bot运行正常。')
-
-@bot.command(name='reset')
-async def reset(ctx):
-    global last_message
-    last_message = None
-    await ctx.send('消息重置，下次更新发新消息。')
-
-# Slash command: /update - 手动触发更新（随时可用）
+# 定义slash命令
 @app_commands.command(name="update", description="手动更新市场图表（立即测试）")
 async def update(interaction: discord.Interaction):
-    print(f"/update 触发: {interaction.user} 在 {interaction.channel.name}")
+    print(f"/update 触发: {interaction.user} 在 {interaction.channel.name} (服务器: {interaction.guild.name})")
     await interaction.response.defer(ephemeral=True)  # 延迟响应
     
     global last_message
@@ -141,6 +92,59 @@ async def update(interaction: discord.Interaction):
     else:
         print("数据不足")
         await interaction.followup.send("数据不足，无法生成图表！", ephemeral=True)
+
+# 注册slash命令到tree（关键修复！）
+bot.tree.add_command(update)
+
+@bot.event
+async def on_ready():
+    global channel, last_message
+    print(f'{bot.user} 已上线！ID: {bot.user.id}')
+    print(f"Bot在 {len(bot.guilds)} 个服务器: {[g.name for g in bot.guilds]}")  # 打印服务器列表
+    
+    # 获取频道
+    guild = bot.guilds[0]
+    channel = discord.utils.get(guild.text_channels, name='general')
+    if not channel:
+        channel = guild.text_channels[0]
+    print(f"目标频道: {channel.name} (ID: {channel.id})")
+    
+    # 加载旧消息
+    try:
+        if os.path.exists(MESSAGE_FILE):
+            with open(MESSAGE_FILE, 'r') as f:
+                data = json.load(f)
+                msg_id = int(data['message_id'])
+                last_message = await channel.fetch_message(msg_id)
+                print(f"加载旧消息: {msg_id}")
+    except Exception as e:
+        print(f"加载旧消息失败: {e}")
+        last_message = None
+    
+    # 全局同步slash commands
+    for attempt in range(3):
+        try:
+            synced = await bot.tree.sync()  # 全局sync
+            print(f"Slash commands synced globally: {len(synced)} (尝试 {attempt+1})")
+            break
+        except Exception as e:
+            print(f"Global sync error (尝试 {attempt+1}): {e}")
+            await asyncio.sleep(5)
+    
+    # 启动定时任务
+    send_update.start()
+    print("定时任务启动：交易时间内每小时更新。")
+
+# 传统命令
+@bot.command(name='ping')
+async def ping(ctx):
+    await ctx.send('Pong! Bot运行正常。')
+
+@bot.command(name='reset')
+async def reset(ctx):
+    global last_message
+    last_message = None
+    await ctx.send('消息重置，下次更新发新消息。')
 
 # 定时任务：每小时检查是否在交易时间内更新
 @tasks.loop(hours=1)
