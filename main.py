@@ -47,31 +47,31 @@ last_message = None
 channel = None
 
 # 定义slash命令
-@app_commands.command(name="update", description="手动更新贪婪恐慌指数图表（立即测试）")
+@app_commands.command(name="update", description="Manually update Fear & Greed chart (immediate test)")
 async def update(interaction: discord.Interaction):
-    print(f"/update 触发: {interaction.user} 在 {interaction.channel.name} (服务器: {interaction.guild.name})")
-    await interaction.response.defer(ephemeral=True)  # 延迟响应
+    print(f"/update triggered: {interaction.user} in {interaction.channel.name} (server: {interaction.guild.name})")
+    await interaction.response.defer(ephemeral=True)  # Defer response
     
     global last_message
     if not channel:
-        await interaction.followup.send("无可用频道！", ephemeral=True)
+        await interaction.followup.send("No available channel!", ephemeral=True)
         return
     
     now = datetime.now(pytz_timezone('US/Eastern'))
-    print(f"手动更新执行: {now} (由 {interaction.user} 触发)")
+    print(f"Manual update executing: {now} (by {interaction.user})")
     
-    # 数据获取（只Fear & Greed）
+    # Data fetching (only Fear & Greed)
     fg_series = get_fear_greed_history()
     
-    # 即使数据不足，也发文本摘要
-    embed = discord.Embed(title=f"贪婪恐慌指数更新 - {now.strftime('%Y-%m-%d %H:%M')} ET", color=0x00ff00)
-    embed.add_field(name="来源", value="CNN", inline=False)
+    # Always send text summary, even if data insufficient
+    embed = discord.Embed(title=f"Fear & Greed Update - {now.strftime('%Y-%m-%d %H:%M')} ET", color=0x00ff00)
+    embed.add_field(name="Source", value="CNN", inline=False)
     
     if len(fg_series) > 0:
         latest_fg = fg_series.iloc[-1]
-        embed.add_field(name="当前指数", value=f"{latest_fg:.0f}", inline=True)
+        embed.add_field(name="Current Index", value=f"{latest_fg:.0f}", inline=True)
     else:
-        embed.add_field(name="贪婪恐慌指数", value="数据暂不可用", inline=True)
+        embed.add_field(name="Fear & Greed Index", value="Data unavailable", inline=True)
     
     try:
         if len(fg_series) > 0:
@@ -84,9 +84,9 @@ async def update(interaction: discord.Interaction):
                 last_message = new_msg
                 with open(MESSAGE_FILE, 'w') as f:
                     json.dump({'message_id': new_msg.id}, f)
-            print("图表+文本发送成功")
+            print("Chart + text sent successfully")
         else:
-            # 只发文本
+            # Text only
             if last_message:
                 await last_message.edit(embed=embed)
             else:
@@ -94,66 +94,66 @@ async def update(interaction: discord.Interaction):
                 last_message = new_msg
                 with open(MESSAGE_FILE, 'w') as f:
                     json.dump({'message_id': new_msg.id}, f)
-            print("文本摘要发送成功")
-        await interaction.followup.send("更新完成！查看频道。", ephemeral=True)
+            print("Text summary sent successfully")
+        await interaction.followup.send("Update complete! Check channel.", ephemeral=True)
     except Exception as e:
-        print(f"发送失败: {e}")
-        await interaction.followup.send(f"更新失败: {e} (检查bot权限)", ephemeral=True)
+        print(f"Sending failed: {e}")
+        await interaction.followup.send(f"Update failed: {e} (check bot permissions)", ephemeral=True)
 
-# 注册slash命令到tree（关键）
+# Register slash command to tree (key)
 bot.tree.add_command(update)
 
 @bot.event
 async def on_ready():
     global channel, last_message
-    print(f'{bot.user} 已上线！ID: {bot.user.id}')
-    print(f"Bot在 {len(bot.guilds)} 个服务器: {[g.name for g in bot.guilds]}")
+    print(f'{bot.user} logged in! ID: {bot.user.id}')
+    print(f"Bot in {len(bot.guilds)} servers: {[g.name for g in bot.guilds]}")
     
-    # 获取频道
+    # Get channel
     guild = bot.guilds[0]
     channel = discord.utils.get(guild.text_channels, name='general')
     if not channel:
         channel = guild.text_channels[0]
-    print(f"目标频道: {channel.name} (ID: {channel.id})")
+    print(f"Target channel: {channel.name} (ID: {channel.id})")
     
-    # 加载旧消息
+    # Load old message
     try:
         if os.path.exists(MESSAGE_FILE):
             with open(MESSAGE_FILE, 'r') as f:
                 data = json.load(f)
                 msg_id = int(data['message_id'])
                 last_message = await channel.fetch_message(msg_id)
-                print(f"加载旧消息: {msg_id}")
+                print(f"Loaded old message: {msg_id}")
     except Exception as e:
-        print(f"加载旧消息失败: {e}")
+        print(f"Loading old message failed: {e}")
         last_message = None
     
-    # 全局同步slash commands
+    # Global sync slash commands
     for attempt in range(3):
         try:
             synced = await bot.tree.sync()
-            print(f"Slash commands synced globally: {len(synced)} (尝试 {attempt+1})")
+            print(f"Slash commands synced globally: {len(synced)} (attempt {attempt+1})")
             break
         except Exception as e:
-            print(f"Global sync error (尝试 {attempt+1}): {e}")
+            print(f"Global sync error (attempt {attempt+1}): {e}")
             await asyncio.sleep(5)
     
-    # 启动定时任务
+    # Start timed task
     send_update.start()
-    print("定时任务启动：交易时间内每小时更新。")
+    print("Timed task started: Update hourly during trading hours.")
 
-# 传统命令
+# Traditional commands
 @bot.command(name='ping')
 async def ping(ctx):
-    await ctx.send('Pong! Bot运行正常。')
+    await ctx.send('Pong! Bot running normally.')
 
 @bot.command(name='reset')
 async def reset(ctx):
     global last_message
     last_message = None
-    await ctx.send('消息重置，下次更新发新消息。')
+    await ctx.send('Message reset, next update will send new.')
 
-# 定时任务：每小时检查是否在交易时间内更新
+# Timed task: Check hourly if in trading hours for update
 @tasks.loop(hours=1)
 async def send_update():
     global last_message
@@ -161,34 +161,34 @@ async def send_update():
         return
     
     now = datetime.now(pytz_timezone('US/Eastern'))
-    weekday = now.weekday()  # 0=周一, 4=周五, 5/6=周末
+    weekday = now.weekday()  # 0=Mon, 4=Fri, 5/6=weekend
     
-    # 检查是否交易日
-    if weekday > 4:  # 周末
-        print(f"非交易日 ({now.strftime('%A')})，跳过更新")
+    # Check if trading day
+    if weekday > 4:  # Weekend
+        print(f"Non-trading day ({now.strftime('%A')}), skipping update")
         return
     
-    # 检查当前时间是否在开盘-收盘内 (9:30-16:00 ET)
+    # Check if in open-close hours (9:30-16:00 ET)
     current_time = now.strftime("%H:%M")
     if current_time < MARKET_OPEN or current_time > MARKET_CLOSE:
-        print(f"非交易时间 ({current_time} ET)，暂停更新直到开盘")
+        print(f"Non-trading time ({current_time} ET), pause update until open")
         return
     
-    # 在交易时间内，执行更新
-    print(f"交易时间内自动更新: {now}")
+    # In trading hours, execute update
+    print(f"Auto update in trading hours: {now}")
     
-    # 数据获取（只Fear & Greed）
+    # Data fetching (only Fear & Greed)
     fg_series = get_fear_greed_history()
     
-    # 即使数据不足，也发文本摘要
-    embed = discord.Embed(title=f"贪婪恐慌指数更新 - {now.strftime('%Y-%m-%d %H:%M')} ET", color=0x00ff00)
-    embed.add_field(name="来源", value="CNN", inline=False)
+    # Always send text summary, even if data insufficient
+    embed = discord.Embed(title=f"Fear & Greed Update - {now.strftime('%Y-%m-%d %H:%M')} ET", color=0x00ff00)
+    embed.add_field(name="Source", value="CNN", inline=False)
     
     if len(fg_series) > 0:
         latest_fg = fg_series.iloc[-1]
-        embed.add_field(name="当前指数", value=f"{latest_fg:.0f}", inline=True)
+        embed.add_field(name="Current Index", value=f"{latest_fg:.0f}", inline=True)
     else:
-        embed.add_field(name="贪婪恐慌指数", value="数据暂不可用", inline=True)
+        embed.add_field(name="Fear & Greed Index", value="Data unavailable", inline=True)
     
     try:
         if len(fg_series) > 0:
@@ -201,9 +201,9 @@ async def send_update():
                 last_message = new_msg
                 with open(MESSAGE_FILE, 'w') as f:
                     json.dump({'message_id': new_msg.id}, f)
-            print("图表+文本发送成功")
+            print("Chart + text sent successfully")
         else:
-            # 只发文本
+            # Text only
             if last_message:
                 await last_message.edit(embed=embed)
             else:
@@ -211,12 +211,12 @@ async def send_update():
                 last_message = new_msg
                 with open(MESSAGE_FILE, 'w') as f:
                     json.dump({'message_id': new_msg.id}, f)
-            print("文本摘要发送成功")
+            print("Text summary sent successfully")
     except Exception as e:
-        print(f"自动更新失败: {e}")
+        print(f"Auto update failed: {e}")
 
 def get_fear_greed_history(days=HISTORY_DAYS):
-    # 回退最多30天找数据（避未来/周末）
+    # Back up max 30 days for data (avoid future/weekends)
     for attempt in range(30):
         today = datetime.now(timezone.utc).date() - timedelta(days=attempt)
         start_date = today - timedelta(days=days*2)
@@ -233,13 +233,13 @@ def get_fear_greed_history(days=HISTORY_DAYS):
                     df = df[df['date'] >= start_date].tail(days)
                     df = df.sort_values('date').set_index('date')
                     if len(df) > 0:
-                        print(f"F&G数据成功，{len(df)}天 (日期: {today})")
+                        print(f"F&G data success, {len(df)} days (date: {today})")
                         return df['y']
             else:
-                print(f"CNN尝试 {attempt+1} 失败: 空响应或非200")
+                print(f"CNN attempt {attempt+1} failed: empty response or non-200")
         except Exception as e:
-            print(f"F&G尝试 {attempt+1} 错误: {e}")
-    print("F&G所有尝试失败")
+            print(f"F&G attempt {attempt+1} error: {e}")
+    print("All F&G attempts failed")
     return pd.Series()
 
 def create_charts(fg_series):
@@ -247,9 +247,9 @@ def create_charts(fg_series):
     fig, ax = plt.subplots(1, 1, figsize=(10, 4))
     
     ax.plot(fg_series.index, fg_series.values, 'orange', label='CNN Fear & Greed Index', linewidth=1.5)
-    ax.set_title('CNN 恐慌与贪婪指数 (最近30天)')
-    ax.set_ylabel('指数 (0-100)')
-    ax.set_xlabel('日期')
+    ax.set_title('CNN Fear & Greed Index (Last 30 Days)')
+    ax.set_ylabel('Index (0-100)')
+    ax.set_xlabel('Date')
     ax.legend()
     ax.grid(True, alpha=0.3)
     ax.xaxis.set_major_formatter(mdates.DateFormatter('%m/%d'))
