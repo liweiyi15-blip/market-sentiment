@@ -18,6 +18,10 @@ FMP_API_KEY = os.getenv('FMP_API_KEY')
 HISTORY_DAYS = 30
 MESSAGE_FILE = 'last_message_id.json'
 
+# 美股交易时间（美东时间）
+MARKET_OPEN = "09:30"  # 开盘
+MARKET_CLOSE = "16:00"  # 收盘
+
 # 调试token
 print(f"Debug: BOT_TOKEN length: {len(BOT_TOKEN) if BOT_TOKEN else 0}, starts with: {BOT_TOKEN[:5] if BOT_TOKEN else 'EMPTY'}")
 if not BOT_TOKEN or len(BOT_TOKEN) < 50:
@@ -70,9 +74,9 @@ async def on_ready():
     except Exception as e:
         print(f"Sync error: {e}")
     
-    # 启动定时（可选，如果你想保持每小时自动）
+    # 启动定时任务
     send_update.start()
-    print("定时任务启动，每小时更新（可选）。")
+    print("定时任务启动：交易时间内每小时更新。")
 
 # 传统命令
 @bot.command(name='ping')
@@ -85,10 +89,10 @@ async def reset(ctx):
     last_message = None
     await ctx.send('消息重置，下次更新发新消息。')
 
-# Slash command: /update - 手动触发更新
+# Slash command: /update - 手动触发更新（随时可用）
 @app_commands.command(name="update", description="手动更新市场图表（立即测试）")
 async def update(interaction: discord.Interaction):
-    await interaction.response.defer(ephemeral=True)  # 延迟响应，避免超时
+    await interaction.response.defer(ephemeral=True)
     
     global last_message
     if not channel:
@@ -134,7 +138,7 @@ async def update(interaction: discord.Interaction):
         print("数据不足")
         await interaction.followup.send("数据不足，无法生成图表！", ephemeral=True)
 
-# 定时任务（保持，但如果你不想自动，可注释 send_update.start()）
+# 定时任务：每小时检查是否在交易时间内更新
 @tasks.loop(hours=1)
 async def send_update():
     global last_message
@@ -142,10 +146,24 @@ async def send_update():
         return
     
     now = datetime.now(pytz_timezone('US/Eastern'))
-    # 移除周末跳过，如果你想全天运行
-    print(f"自动更新: {now}")
+    today = now.date()
+    weekday = now.weekday()  # 0=周一, 4=周五, 5/6=周末
     
-    # ... (同update函数的数据和发送逻辑，复制粘贴以避免重复)
+    # 检查是否交易日
+    if weekday > 4:  # 周末
+        print(f"非交易日 ({now.strftime('%A')})，跳过更新")
+        return
+    
+    # 检查当前时间是否在开盘-收盘内 (9:30-16:00 ET)
+    current_time = now.strftime("%H:%M")
+    if current_time < MARKET_OPEN or current_time > MARKET_CLOSE:
+        print(f"非交易时间 ({current_time} ET)，暂停更新直到开盘")
+        return
+    
+    # 在交易时间内，执行更新
+    print(f"交易时间内自动更新: {now}")
+    
+    # 数据获取
     fg_series = get_fear_greed_history()
     if not FMP_API_KEY:
         part20 = pd.Series()
@@ -172,7 +190,6 @@ async def send_update():
         except Exception as e:
             print(f"自动更新失败: {e}")
 
-# 函数（同之前）
 def get_fear_greed_history(days=HISTORY_DAYS):
     today = datetime.now(timezone.utc).date()
     start_date = today - timedelta(days=days*2)
