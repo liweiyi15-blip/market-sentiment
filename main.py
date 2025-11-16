@@ -68,39 +68,58 @@ async def update(interaction: discord.Interaction):
         print(f"股票数: {len(tickers)}")
         part20, part50 = calculate_market_participation_history(tickers)
     
-    if len(fg_series) > 0 and len(part20) > 0:
-        image_buf = create_charts(fg_series, part20, part50)
-        file = discord.File(image_buf, filename='market_update.png')
-        
-        embed = discord.Embed(title=f"市场更新 - {now.strftime('%Y-%m-%d %H:%M')} ET", color=0x00ff00)
-        embed.add_field(name="来源", value="CNN & FMP", inline=False)
-        
-        try:
+    # 即使数据不足，也发文本摘要
+    embed = discord.Embed(title=f"市场更新 - {now.strftime('%Y-%m-%d %H:%M')} ET", color=0x00ff00)
+    embed.add_field(name="来源", value="CNN & FMP", inline=False)
+    
+    if len(fg_series) > 0:
+        latest_fg = fg_series.iloc[-1]
+        embed.add_field(name="Fear & Greed 当前", value=f"{latest_fg:.0f}", inline=True)
+    else:
+        embed.add_field(name="Fear & Greed", value="数据暂不可用", inline=True)
+    
+    if len(part20) > 0:
+        latest_20 = part20.iloc[-1]
+        latest_50 = part50.iloc[-1]
+        embed.add_field(name="参与度 (20/50日SMA)", value=f"{latest_20:.1f}% / {latest_50:.1f}%", inline=True)
+    else:
+        embed.add_field(name="参与度", value="数据暂不可用", inline=True)
+    
+    try:
+        if len(fg_series) > 0 and len(part20) > 0:
+            image_buf = create_charts(fg_series, part20, part50)
+            file = discord.File(image_buf, filename='market_update.png')
             if last_message:
                 await last_message.edit(embed=embed, attachments=[file])
-                print("编辑成功")
             else:
                 new_msg = await channel.send(embed=embed, file=file)
                 last_message = new_msg
                 with open(MESSAGE_FILE, 'w') as f:
                     json.dump({'message_id': new_msg.id}, f)
-                print("新消息发送")
-            await interaction.followup.send("图表更新完成！查看频道。", ephemeral=True)
-        except Exception as e:
-            print(f"发送失败: {e}")
-            await interaction.followup.send(f"更新失败: {e}", ephemeral=True)
-    else:
-        print("数据不足")
-        await interaction.followup.send("数据不足，无法生成图表！", ephemeral=True)
+            print("图表+文本发送成功")
+        else:
+            # 只发文本
+            if last_message:
+                await last_message.edit(embed=embed)
+            else:
+                new_msg = await channel.send(embed=embed)
+                last_message = new_msg
+                with open(MESSAGE_FILE, 'w') as f:
+                    json.dump({'message_id': new_msg.id}, f)
+            print("文本摘要发送成功")
+        await interaction.followup.send("更新完成！查看频道（即使数据不足，也发摘要）。", ephemeral=True)
+    except Exception as e:
+        print(f"发送失败: {e}")
+        await interaction.followup.send(f"更新失败: {e}", ephemeral=True)
 
-# 注册slash命令到tree（关键修复！）
+# 注册slash命令到tree（关键）
 bot.tree.add_command(update)
 
 @bot.event
 async def on_ready():
     global channel, last_message
     print(f'{bot.user} 已上线！ID: {bot.user.id}')
-    print(f"Bot在 {len(bot.guilds)} 个服务器: {[g.name for g in bot.guilds]}")  # 打印服务器列表
+    print(f"Bot在 {len(bot.guilds)} 个服务器: {[g.name for g in bot.guilds]}")
     
     # 获取频道
     guild = bot.guilds[0]
@@ -124,7 +143,7 @@ async def on_ready():
     # 全局同步slash commands
     for attempt in range(3):
         try:
-            synced = await bot.tree.sync()  # 全局sync
+            synced = await bot.tree.sync()
             print(f"Slash commands synced globally: {len(synced)} (尝试 {attempt+1})")
             break
         except Exception as e:
@@ -179,14 +198,27 @@ async def send_update():
         tickers = get_sp500_tickers()
         part20, part50 = calculate_market_participation_history(tickers)
     
-    if len(fg_series) > 0 and len(part20) > 0:
-        image_buf = create_charts(fg_series, part20, part50)
-        file = discord.File(image_buf, filename='market_update.png')
-        
-        embed = discord.Embed(title=f"市场更新 - {now.strftime('%Y-%m-%d %H:%M')} ET", color=0x00ff00)
-        embed.add_field(name="来源", value="CNN & FMP", inline=False)
-        
-        try:
+    # 即使数据不足，也发文本摘要
+    embed = discord.Embed(title=f"市场更新 - {now.strftime('%Y-%m-%d %H:%M')} ET", color=0x00ff00)
+    embed.add_field(name="来源", value="CNN & FMP", inline=False)
+    
+    if len(fg_series) > 0:
+        latest_fg = fg_series.iloc[-1]
+        embed.add_field(name="Fear & Greed 当前", value=f"{latest_fg:.0f}", inline=True)
+    else:
+        embed.add_field(name="Fear & Greed", value="数据暂不可用", inline=True)
+    
+    if len(part20) > 0:
+        latest_20 = part20.iloc[-1]
+        latest_50 = part50.iloc[-1]
+        embed.add_field(name="参与度 (20/50日SMA)", value=f"{latest_20:.1f}% / {latest_50:.1f}%", inline=True)
+    else:
+        embed.add_field(name="参与度", value="数据暂不可用", inline=True)
+    
+    try:
+        if len(fg_series) > 0 and len(part20) > 0:
+            image_buf = create_charts(fg_series, part20, part50)
+            file = discord.File(image_buf, filename='market_update.png')
             if last_message:
                 await last_message.edit(embed=embed, attachments=[file])
             else:
@@ -194,32 +226,62 @@ async def send_update():
                 last_message = new_msg
                 with open(MESSAGE_FILE, 'w') as f:
                     json.dump({'message_id': new_msg.id}, f)
-        except Exception as e:
-            print(f"自动更新失败: {e}")
+            print("图表+文本发送成功")
+        else:
+            # 只发文本
+            if last_message:
+                await last_message.edit(embed=embed)
+            else:
+                new_msg = await channel.send(embed=embed)
+                last_message = new_msg
+                with open(MESSAGE_FILE, 'w') as f:
+                    json.dump({'message_id': new_msg.id}, f)
+            print("文本摘要发送成功")
+    except Exception as e:
+        print(f"自动更新失败: {e}")
 
 def get_fear_greed_history(days=HISTORY_DAYS):
-    today = datetime.now(timezone.utc).date()
-    start_date = today - timedelta(days=days*2)
-    url = f"https://production.dataviz.cnn.io/index/fearandgreed/graphdata/{today}"
-    try:
-        response = requests.get(url)
-        data = response.json()
-        historical = data['fear_and_greed_historical']['data']
-        df = pd.DataFrame(historical)
-        df['date'] = pd.to_datetime(df['x'], unit='ms').dt.date
-        df = df[df['date'] >= start_date].tail(days)
-        df = df.sort_values('date').set_index('date')
-        return df['y']
-    except Exception as e:
-        print(f"F&G错误: {e}")
-        return pd.Series()
+    # 尝试当前日期，回退最多3天找数据
+    for attempt in range(3):
+        today = (datetime.now(timezone.utc).date() - timedelta(days=attempt)).strftime('%Y-%m-%d')
+        start_date = (datetime.now(timezone.utc).date() - timedelta(days=days*2 + attempt)).strftime('%Y-%m-%d')
+        url = f"https://production.dataviz.cnn.io/index/fearandgreed/graphdata/{today}"
+        try:
+            response = requests.get(url)
+            print(f"CNN API status: {response.status_code}, text preview: {response.text[:100]}")
+            if response.status_code == 200 and response.text.strip():
+                data = response.json()
+                historical = data['fear_and_greed_historical']['data']
+                df = pd.DataFrame(historical)
+                df['date'] = pd.to_datetime(df['x'], unit='ms').dt.date
+                df = df[df['date'] >= datetime.strptime(start_date, '%Y-%m-%d').date()].tail(days)
+                df = df.sort_values('date').set_index('date')
+                if len(df) > 0:
+                    print(f"F&G数据成功，{len(df)}天")
+                    return df['y']
+            else:
+                print(f"CNN尝试 {attempt+1} 失败: 空响应或非200")
+        except Exception as e:
+            print(f"F&G尝试 {attempt+1} 错误: {e}")
+    print("F&G所有尝试失败")
+    return pd.Series()
 
 def get_sp500_tickers():
     url = f"https://financialmodelingprep.com/api/v3/sp500_constituent?apikey={FMP_API_KEY}"
     try:
         response = requests.get(url)
-        data = response.json()
-        return [stock['symbol'] for stock in data]
+        print(f"FMP API status: {response.status_code}, text preview: {response.text[:200]}")
+        if response.status_code == 200:
+            data = response.json()
+            if isinstance(data, list):
+                print(f"S&P列表成功，{len(data)}只股票")
+                return [stock['symbol'] for stock in data]
+            else:
+                print(f"S&P响应非列表: {type(data)}")
+                return []
+        else:
+            print(f"FMP非200: {response.status_code}")
+            return []
     except Exception as e:
         print(f"S&P列表错误: {e}")
         return []
@@ -230,18 +292,25 @@ def get_historical_prices(symbol, days=HISTORY_DAYS * 2):
     url = f"https://financialmodelingprep.com/api/v3/historical-price-full/{symbol}?from={start_date}&to={end_date}&apikey={FMP_API_KEY}"
     try:
         response = requests.get(url)
-        data = response.json()
-        if 'historical' in data:
-            df = pd.DataFrame(data['historical'])
-            df['date'] = pd.to_datetime(df['date'])
-            df = df.sort_values('date').set_index('date')
-            return df['close']
+        print(f"FMP价格 {symbol} status: {response.status_code}, preview: {response.text[:100]}")
+        if response.status_code == 200:
+            data = response.json()
+            if 'historical' in data and isinstance(data['historical'], list):
+                df = pd.DataFrame(data['historical'])
+                df['date'] = pd.to_datetime(df['date'])
+                df = df.sort_values('date').set_index('date')
+                return df['close']
         return pd.Series()
     except Exception as e:
         print(f"{symbol}价格错误: {e}")
         return pd.Series()
 
 def calculate_market_participation_history(tickers, days=HISTORY_DAYS):
+    if not tickers:
+        print("无股票列表，参与度为空")
+        empty_series = pd.Series(index=pd.date_range(end=datetime.now().date(), periods=days, freq='D')[:-1], dtype=float)
+        return empty_series, empty_series
+    
     dates = pd.date_range(end=datetime.now().date(), periods=days, freq='D')[:-1]
     participation_20 = pd.Series(index=dates, dtype=float)
     participation_50 = pd.Series(index=dates, dtype=float)
