@@ -260,43 +260,4 @@ def calculate_market_participation_history(tickers, days=HISTORY_DAYS):
                 if close > sma50:
                     above_50 += 1
         if total > 0:
-            participation_20[date.date()] = (above_20 / total) * 100
-            participation_50[date.date()] = (above_50 / total) * 100
-        time.sleep(0.05)
-    
-    return participation_20, participation_50
-
-def create_charts(fg_series, part20, part50):
-    plt.style.use('dark_background')
-    fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(10, 8))
-    
-    ax1.plot(part20.index, part20.values, 'r-', label='高于20日SMA', linewidth=1.5)
-    ax1.plot(part50.index, part50.values, 'b-', label='高于50日SMA', linewidth=1.5)
-    ax1.set_title('S&P 500 市场参与度 (最近30天)')
-    ax1.set_ylabel('百分比 (%)')
-    ax1.legend()
-    ax1.grid(True, alpha=0.3)
-    ax1.xaxis.set_major_formatter(mdates.DateFormatter('%m/%d'))
-    ax1.tick_params(axis='x', rotation=45)
-    
-    ax2.plot(fg_series.index, fg_series.values, 'orange', label='CNN Fear & Greed Index', linewidth=1.5)
-    ax2.set_title('CNN 恐慌与贪婪指数 (最近30天)')
-    ax2.set_ylabel('指数 (0-100)')
-    ax2.set_xlabel('日期')
-    ax2.legend()
-    ax2.grid(True, alpha=0.3)
-    ax2.xaxis.set_major_formatter(mdates.DateFormatter('%m/%d'))
-    ax2.tick_params(axis='x', rotation=45)
-    
-    plt.tight_layout()
-    buf = BytesIO()
-    plt.savefig(buf, format='png', dpi=150, bbox_inches='tight')
-    buf.seek(0)
-    plt.close()
-    return buf
-
-# 运行
-try:
-    bot.run(BOT_TOKEN)
-except Exception as e:
-    print(f"Bot运行错误: {e}")
+            participation_20[date.date()]
