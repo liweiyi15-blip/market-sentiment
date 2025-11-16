@@ -10,7 +10,7 @@ from pytz import timezone as pytz_timezone
 import os
 import json
 import time
-import asyncio  # 异步支持
+import asyncio
 
 # 配置（从环境变量读）
 BOT_TOKEN = os.getenv('BOT_TOKEN')
@@ -18,19 +18,22 @@ FMP_API_KEY = os.getenv('FMP_API_KEY')
 HISTORY_DAYS = 30
 MESSAGE_FILE = 'last_message_id.json'
 
-# 调试token（安全，只打印长度/前缀）
+# 调试token
 print(f"Debug: BOT_TOKEN length: {len(BOT_TOKEN) if BOT_TOKEN else 0}, starts with: {BOT_TOKEN[:5] if BOT_TOKEN else 'EMPTY'}")
 if not BOT_TOKEN or len(BOT_TOKEN) < 50:
     print("ERROR: BOT_TOKEN无效！检查Railway Variables并重置Discord token。")
-    exit(1)  # 退出，避免循环
+    exit(1)
 
 if not FMP_API_KEY:
     print("WARNING: FMP_API_KEY未设置，市场数据将跳过。")
 
 # Bot设置
 intents = discord.Intents.default()
-intents.message_content = True  # 需Discord侧开启Message Content Intent
+intents.message_content = True
 bot = commands.Bot(command_prefix='!', intents=intents)
+
+# Slash commands 支持
+from discord import app_commands
 
 # 全局
 last_message = None
@@ -60,9 +63,18 @@ async def on_ready():
         print(f"加载旧消息失败: {e}")
         last_message = None
     
+    # 同步slash commands
+    try:
+        synced = await bot.tree.sync(guild=guild)
+        print(f"Slash commands synced: {len(synced)}")
+    except Exception as e:
+        print(f"Sync error: {e}")
+    
+    # 启动定时（可选，如果你想保持每小时自动）
     send_update.start()
-    print("定时任务启动，每小时更新。")
+    print("定时任务启动，每小时更新（可选）。")
 
+# 传统命令
 @bot.command(name='ping')
 async def ping(ctx):
     await ctx.send('Pong! Bot运行正常。')
@@ -73,21 +85,20 @@ async def reset(ctx):
     last_message = None
     await ctx.send('消息重置，下次更新发新消息。')
 
-@tasks.loop(hours=1)
-async def send_update():
+# Slash command: /update - 手动触发更新
+@app_commands.command(name="update", description="手动更新市场图表（立即测试）")
+async def update(interaction: discord.Interaction):
+    await interaction.response.defer(ephemeral=True)  # 延迟响应，避免超时
+    
     global last_message
     if not channel:
-        print("无频道，跳过")
+        await interaction.followup.send("无可用频道！", ephemeral=True)
         return
     
     now = datetime.now(pytz_timezone('US/Eastern'))
-    if now.weekday() >= 5:
-        print("周末跳过")
-        return
+    print(f"手动更新执行: {now} (由 {interaction.user} 触发)")
     
-    print(f"更新执行: {now}")
-    
-    # 数据
+    # 数据获取
     fg_series = get_fear_greed_history()
     if not FMP_API_KEY:
         print("无FMP_KEY，跳过参与度")
@@ -115,15 +126,53 @@ async def send_update():
                 with open(MESSAGE_FILE, 'w') as f:
                     json.dump({'message_id': new_msg.id}, f)
                 print("新消息发送")
+            await interaction.followup.send("图表更新完成！查看频道。", ephemeral=True)
         except Exception as e:
             print(f"发送失败: {e}")
-            new_msg = await channel.send(embed=embed, file=file)
-            last_message = new_msg
-            with open(MESSAGE_FILE, 'w') as f:
-                json.dump({'message_id': new_msg.id}, f)
+            await interaction.followup.send(f"更新失败: {e}", ephemeral=True)
     else:
-        print("数据不足，跳过")
+        print("数据不足")
+        await interaction.followup.send("数据不足，无法生成图表！", ephemeral=True)
 
+# 定时任务（保持，但如果你不想自动，可注释 send_update.start()）
+@tasks.loop(hours=1)
+async def send_update():
+    global last_message
+    if not channel:
+        return
+    
+    now = datetime.now(pytz_timezone('US/Eastern'))
+    # 移除周末跳过，如果你想全天运行
+    print(f"自动更新: {now}")
+    
+    # ... (同update函数的数据和发送逻辑，复制粘贴以避免重复)
+    fg_series = get_fear_greed_history()
+    if not FMP_API_KEY:
+        part20 = pd.Series()
+        part50 = pd.Series()
+    else:
+        tickers = get_sp500_tickers()
+        part20, part50 = calculate_market_participation_history(tickers)
+    
+    if len(fg_series) > 0 and len(part20) > 0:
+        image_buf = create_charts(fg_series, part20, part50)
+        file = discord.File(image_buf, filename='market_update.png')
+        
+        embed = discord.Embed(title=f"市场更新 - {now.strftime('%Y-%m-%d %H:%M')} ET", color=0x00ff00)
+        embed.add_field(name="来源", value="CNN & FMP", inline=False)
+        
+        try:
+            if last_message:
+                await last_message.edit(embed=embed, attachments=[file])
+            else:
+                new_msg = await channel.send(embed=embed, file=file)
+                last_message = new_msg
+                with open(MESSAGE_FILE, 'w') as f:
+                    json.dump({'message_id': new_msg.id}, f)
+        except Exception as e:
+            print(f"自动更新失败: {e}")
+
+# 函数（同之前）
 def get_fear_greed_history(days=HISTORY_DAYS):
     today = datetime.now(timezone.utc).date()
     start_date = today - timedelta(days=days*2)
