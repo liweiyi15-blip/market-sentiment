@@ -67,12 +67,15 @@ async def on_ready():
         print(f"加载旧消息失败: {e}")
         last_message = None
     
-    # 同步slash commands
-    try:
-        synced = await bot.tree.sync(guild=guild)
-        print(f"Slash commands synced: {len(synced)}")
-    except Exception as e:
-        print(f"Sync error: {e}")
+    # 同步slash commands（加重试）
+    for attempt in range(3):
+        try:
+            synced = await bot.tree.sync(guild=guild)
+            print(f"Slash commands synced: {len(synced)} (尝试 {attempt+1})")
+            break
+        except Exception as e:
+            print(f"Sync error (尝试 {attempt+1}): {e}")
+            await asyncio.sleep(5)  # 等5s重试
     
     # 启动定时任务
     send_update.start()
@@ -92,7 +95,8 @@ async def reset(ctx):
 # Slash command: /update - 手动触发更新（随时可用）
 @app_commands.command(name="update", description="手动更新市场图表（立即测试）")
 async def update(interaction: discord.Interaction):
-    await interaction.response.defer(ephemeral=True)
+    print(f"/update 触发: {interaction.user} 在 {interaction.channel.name}")
+    await interaction.response.defer(ephemeral=True)  # 延迟响应
     
     global last_message
     if not channel:
@@ -146,7 +150,6 @@ async def send_update():
         return
     
     now = datetime.now(pytz_timezone('US/Eastern'))
-    today = now.date()
     weekday = now.weekday()  # 0=周一, 4=周五, 5/6=周末
     
     # 检查是否交易日
@@ -260,4 +263,43 @@ def calculate_market_participation_history(tickers, days=HISTORY_DAYS):
                 if close > sma50:
                     above_50 += 1
         if total > 0:
-            participation_20[date.date()]
+            participation_20[date.date()] = (above_20 / total) * 100
+            participation_50[date.date()] = (above_50 / total) * 100
+        time.sleep(0.05)
+    
+    return participation_20, participation_50
+
+def create_charts(fg_series, part20, part50):
+    plt.style.use('dark_background')
+    fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(10, 8))
+    
+    ax1.plot(part20.index, part20.values, 'r-', label='高于20日SMA', linewidth=1.5)
+    ax1.plot(part50.index, part50.values, 'b-', label='高于50日SMA', linewidth=1.5)
+    ax1.set_title('S&P 500 市场参与度 (最近30天)')
+    ax1.set_ylabel('百分比 (%)')
+    ax1.legend()
+    ax1.grid(True, alpha=0.3)
+    ax1.xaxis.set_major_formatter(mdates.DateFormatter('%m/%d'))
+    ax1.tick_params(axis='x', rotation=45)
+    
+    ax2.plot(fg_series.index, fg_series.values, 'orange', label='CNN Fear & Greed Index', linewidth=1.5)
+    ax2.set_title('CNN 恐慌与贪婪指数 (最近30天)')
+    ax2.set_ylabel('指数 (0-100)')
+    ax2.set_xlabel('日期')
+    ax2.legend()
+    ax2.grid(True, alpha=0.3)
+    ax2.xaxis.set_major_formatter(mdates.DateFormatter('%m/%d'))
+    ax2.tick_params(axis='x', rotation=45)
+    
+    plt.tight_layout()
+    buf = BytesIO()
+    plt.savefig(buf, format='png', dpi=150, bbox_inches='tight')
+    buf.seek(0)
+    plt.close()
+    return buf
+
+# 运行
+try:
+    bot.run(BOT_TOKEN)
+except Exception as e:
+    print(f"Bot运行错误: {e}")
