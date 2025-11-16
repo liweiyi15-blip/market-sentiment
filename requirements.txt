@@ -1,6 +1,7 @@
 requests
 pandas
-schedule
+schedule  # 可删，如果不用
 matplotlib
 pillow
 pytz
+discord.py
