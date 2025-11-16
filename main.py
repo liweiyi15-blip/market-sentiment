@@ -7,68 +7,126 @@ import matplotlib.dates as mdates
 from io import BytesIO
 from datetime import datetime, timezone, timedelta
 from pytz import timezone as pytz_timezone
-import asyncio
+import os
+import json
+import time
+import asyncio  # 异步支持
 
-# 配置（用环境变量替换，Railway会注入）
-BOT_TOKEN = "YOUR_BOT_TOKEN_HERE"  # 从Discord Developer Portal获取，Railway Variables中设置
-FMP_API_KEY = "your_fmp_api_key_here"  # 从FMP dashboard获取，Railway Variables中设置
-HISTORY_DAYS = 30  # 图表显示最近30天
+# 配置（从环境变量读）
+BOT_TOKEN = os.getenv('BOT_TOKEN')
+FMP_API_KEY = os.getenv('FMP_API_KEY')
+HISTORY_DAYS = 30
+MESSAGE_FILE = 'last_message_id.json'
+
+# 调试token（安全，只打印长度/前缀）
+print(f"Debug: BOT_TOKEN length: {len(BOT_TOKEN) if BOT_TOKEN else 0}, starts with: {BOT_TOKEN[:5] if BOT_TOKEN else 'EMPTY'}")
+if not BOT_TOKEN or len(BOT_TOKEN) < 50:
+    print("ERROR: BOT_TOKEN无效！检查Railway Variables并重置Discord token。")
+    exit(1)  # 退出，避免循环
+
+if not FMP_API_KEY:
+    print("WARNING: FMP_API_KEY未设置，市场数据将跳过。")
 
 # Bot设置
 intents = discord.Intents.default()
-intents.message_content = True
+intents.message_content = True  # 需Discord侧开启Message Content Intent
 bot = commands.Bot(command_prefix='!', intents=intents)
+
+# 全局
+last_message = None
+channel = None
 
 @bot.event
 async def on_ready():
-    print(f'{bot.user} 已上线！')
-    send_update.start()  # 启动定时任务
+    global channel, last_message
+    print(f'{bot.user} 已上线！ID: {bot.user.id}')
+    
+    # 获取频道
+    guild = bot.guilds[0]
+    channel = discord.utils.get(guild.text_channels, name='general')
+    if not channel:
+        channel = guild.text_channels[0]
+    print(f"目标频道: {channel.name} (ID: {channel.id})")
+    
+    # 加载旧消息
+    try:
+        if os.path.exists(MESSAGE_FILE):
+            with open(MESSAGE_FILE, 'r') as f:
+                data = json.load(f)
+                msg_id = int(data['message_id'])
+                last_message = await channel.fetch_message(msg_id)
+                print(f"加载旧消息: {msg_id}")
+    except Exception as e:
+        print(f"加载旧消息失败: {e}")
+        last_message = None
+    
+    send_update.start()
+    print("定时任务启动，每小时更新。")
 
 @bot.command(name='ping')
 async def ping(ctx):
-    """测试命令：!ping"""
     await ctx.send('Pong! Bot运行正常。')
 
-@tasks.loop(hours=1)  # 每小时运行（美东时间整点）
+@bot.command(name='reset')
+async def reset(ctx):
+    global last_message
+    last_message = None
+    await ctx.send('消息重置，下次更新发新消息。')
+
+@tasks.loop(hours=1)
 async def send_update():
-    # 自动获取bot所在服务器的默认频道（假设bot在一个服务器）
-    guild = bot.guilds[0]  # 如果bot在多个服务器，可加GUILD_ID环境变量指定
-    channel = discord.utils.get(guild.text_channels, name='general')  # 优先#general
+    global last_message
     if not channel:
-        channel = guild.text_channels[0]  # 回退到第一个文本频道
-    if not channel:
-        print("未找到可用频道！")
+        print("无频道，跳过")
         return
-
+    
     now = datetime.now(pytz_timezone('US/Eastern'))
-    print(f"执行时间: {now}，发送到频道: {channel.name}")
-
-    # 获取Fear & Greed历史
+    if now.weekday() >= 5:
+        print("周末跳过")
+        return
+    
+    print(f"更新执行: {now}")
+    
+    # 数据
     fg_series = get_fear_greed_history()
-
-    # 获取S&P 500列表
-    tickers = get_sp500_tickers()
-    print(f"处理 {len(tickers)} 只股票的历史...")
-
-    # 计算市场参与度历史
-    part20, part50 = calculate_market_participation_history(tickers)
-
-    if len(fg_series) > 0 and len(part20) > 0:
-        # 生成图表
-        image_buf = create_charts(fg_series, part20, part50)
-        # 发送embed消息+附件
-        embed = discord.Embed(title=f"每小时市场更新 - {datetime.now().strftime('%Y-%m-%d %H:%M')} (美东时间)", color=0x00ff00)
-        embed.add_field(name="数据来源", value="CNN & FMP", inline=False)
-        file = discord.File(image_buf, filename='market_update.png')
-        await channel.send(embed=embed, file=file)
-        print("图表发送成功")
+    if not FMP_API_KEY:
+        print("无FMP_KEY，跳过参与度")
+        part20 = pd.Series()
+        part50 = pd.Series()
     else:
-        print("数据不足，跳过发送")
+        tickers = get_sp500_tickers()
+        print(f"股票数: {len(tickers)}")
+        part20, part50 = calculate_market_participation_history(tickers)
+    
+    if len(fg_series) > 0 and len(part20) > 0:
+        image_buf = create_charts(fg_series, part20, part50)
+        file = discord.File(image_buf, filename='market_update.png')
+        
+        embed = discord.Embed(title=f"市场更新 - {now.strftime('%Y-%m-%d %H:%M')} ET", color=0x00ff00)
+        embed.add_field(name="来源", value="CNN & FMP", inline=False)
+        
+        try:
+            if last_message:
+                await last_message.edit(embed=embed, attachments=[file])
+                print("编辑成功")
+            else:
+                new_msg = await channel.send(embed=embed, file=file)
+                last_message = new_msg
+                with open(MESSAGE_FILE, 'w') as f:
+                    json.dump({'message_id': new_msg.id}, f)
+                print("新消息发送")
+        except Exception as e:
+            print(f"发送失败: {e}")
+            new_msg = await channel.send(embed=embed, file=file)
+            last_message = new_msg
+            with open(MESSAGE_FILE, 'w') as f:
+                json.dump({'message_id': new_msg.id}, f)
+    else:
+        print("数据不足，跳过")
 
 def get_fear_greed_history(days=HISTORY_DAYS):
-    """获取CNN Fear & Greed最近days天历史"""
     today = datetime.now(timezone.utc).date()
-    start_date = today - timedelta(days=days*2)  # 多取点防缺失
+    start_date = today - timedelta(days=days*2)
     url = f"https://production.dataviz.cnn.io/index/fearandgreed/graphdata/{today}"
     try:
         response = requests.get(url)
@@ -76,28 +134,26 @@ def get_fear_greed_history(days=HISTORY_DAYS):
         historical = data['fear_and_greed_historical']['data']
         df = pd.DataFrame(historical)
         df['date'] = pd.to_datetime(df['x'], unit='ms').dt.date
-        df = df[df['date'] >= start_date].tail(days)  # 最近days天
+        df = df[df['date'] >= start_date].tail(days)
         df = df.sort_values('date').set_index('date')
-        return df['y']  # score
+        return df['y']
     except Exception as e:
-        print(f"获取Fear & Greed历史失败: {e}")
+        print(f"F&G错误: {e}")
         return pd.Series()
 
 def get_sp500_tickers():
-    """从FMP获取S&P 500股票列表"""
     url = f"https://financialmodelingprep.com/api/v3/sp500_constituent?apikey={FMP_API_KEY}"
     try:
         response = requests.get(url)
         data = response.json()
         return [stock['symbol'] for stock in data]
     except Exception as e:
-        print(f"获取S&P 500列表失败: {e}")
+        print(f"S&P列表错误: {e}")
         return []
 
 def get_historical_prices(symbol, days=HISTORY_DAYS * 2):
-    """从FMP获取单个股票最近days天历史价格"""
     end_date = datetime.now().strftime('%Y-%m-%d')
-    start_date = (datetime.now() - timedelta(days=days + 50)).strftime('%Y-%m-%d')  # 多取50天防SMA
+    start_date = (datetime.now() - timedelta(days=days + 50)).strftime('%Y-%m-%d')
     url = f"https://financialmodelingprep.com/api/v3/historical-price-full/{symbol}?from={start_date}&to={end_date}&apikey={FMP_API_KEY}"
     try:
         response = requests.get(url)
@@ -109,16 +165,15 @@ def get_historical_prices(symbol, days=HISTORY_DAYS * 2):
             return df['close']
         return pd.Series()
     except Exception as e:
-        print(f"获取 {symbol} 历史价格失败: {e}")
+        print(f"{symbol}价格错误: {e}")
         return pd.Series()
 
 def calculate_market_participation_history(tickers, days=HISTORY_DAYS):
-    """计算最近days天高于20日/50日SMA的百分比历史（测试用前50只股票，生产去掉[:50]）"""
-    dates = pd.date_range(end=datetime.now().date(), periods=days, freq='D')[:-1]  # 最近days-1个交易日
+    dates = pd.date_range(end=datetime.now().date(), periods=days, freq='D')[:-1]
     participation_20 = pd.Series(index=dates, dtype=float)
     participation_50 = pd.Series(index=dates, dtype=float)
     
-    tickers_sample = tickers[:50]  # 限50只防运行慢，实际部署时可改成tickers全量（需优化限流）
+    tickers_sample = tickers[:50]  # 限50防慢
     for date in dates:
         hist_days_needed = 50 + (datetime.now() - date).days
         above_20, above_50, total = 0, 0, 0
@@ -130,8 +185,8 @@ def calculate_market_participation_history(tickers, days=HISTORY_DAYS):
             if len(df_up_to_date) < 50:
                 continue
             close = df_up_to_date.iloc[-1]
-            sma20 = df_up_to_date.rolling(window=20).mean().iloc[-1]
-            sma50 = df_up_to_date.rolling(window=50).mean().iloc[-1]
+            sma20 = df_up_to_date.rolling(20).mean().iloc[-1]
+            sma50 = df_up_to_date.rolling(50).mean().iloc[-1]
             if pd.notna(close) and pd.notna(sma20) and pd.notna(sma50):
                 total += 1
                 if close > sma20:
@@ -141,16 +196,14 @@ def calculate_market_participation_history(tickers, days=HISTORY_DAYS):
         if total > 0:
             participation_20[date.date()] = (above_20 / total) * 100
             participation_50[date.date()] = (above_50 / total) * 100
-        time.sleep(0.05)  # 限流，防FMP API限额
+        time.sleep(0.05)
     
     return participation_20, participation_50
 
 def create_charts(fg_series, part20, part50):
-    """生成图表并返回BytesIO图像"""
-    plt.style.use('dark_background')  # 黑背景匹配你的截图
+    plt.style.use('dark_background')
     fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(10, 8))
     
-    # 上图：市场参与度
     ax1.plot(part20.index, part20.values, 'r-', label='高于20日SMA', linewidth=1.5)
     ax1.plot(part50.index, part50.values, 'b-', label='高于50日SMA', linewidth=1.5)
     ax1.set_title('S&P 500 市场参与度 (最近30天)')
@@ -160,7 +213,6 @@ def create_charts(fg_series, part20, part50):
     ax1.xaxis.set_major_formatter(mdates.DateFormatter('%m/%d'))
     ax1.tick_params(axis='x', rotation=45)
     
-    # 下图：Fear & Greed
     ax2.plot(fg_series.index, fg_series.values, 'orange', label='CNN Fear & Greed Index', linewidth=1.5)
     ax2.set_title('CNN 恐慌与贪婪指数 (最近30天)')
     ax2.set_ylabel('指数 (0-100)')
@@ -177,5 +229,8 @@ def create_charts(fg_series, part20, part50):
     plt.close()
     return buf
 
-# 运行bot
-bot.run(BOT_TOKEN)
+# 运行
+try:
+    bot.run(BOT_TOKEN)
+except Exception as e:
+    print(f"Bot运行错误: {e}")
