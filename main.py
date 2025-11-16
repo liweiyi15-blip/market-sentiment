@@ -11,7 +11,7 @@ import os
 import json
 import time
 import asyncio
-import yfinance as yf  # S&P 500数据替代FMP
+import yfinance as yf  # S&P 500数据
 import warnings  # 抑制FutureWarning
 warnings.filterwarnings("ignore", category=FutureWarning)
 
@@ -51,6 +51,15 @@ from discord import app_commands
 last_message = None
 channel = None
 
+# 静态S&P 500 tickers (前50只，避wikipedia依赖；生产可扩展全503)
+SP500_TICKERS = [
+    'AAPL', 'MSFT', 'GOOGL', 'AMZN', 'NVDA', 'META', 'TSLA', 'BRK-B', 'UNH', 'XOM',
+    'JNJ', 'V', 'PG', 'JPM', 'MA', 'HD', 'AVGO', 'CVX', 'LLY', 'ABBV',
+    'PFE', 'KO', 'BAC', 'ADBE', 'COST', 'CRM', 'NFLX', 'ACN', 'WMT', 'TMO',
+    'MRK', 'ABT', 'DIS', 'DHR', 'VZ', 'TXN', 'NEE', 'WFC', 'PM', 'ORCL',
+    'CSCO', 'INTC', 'IBM', 'NOW', 'AMGN', 'CAT', 'GS', 'RTX', 'UNP', 'HON'
+]
+
 # 定义slash命令
 @app_commands.command(name="update", description="手动更新市场图表（立即测试）")
 async def update(interaction: discord.Interaction):
@@ -67,7 +76,7 @@ async def update(interaction: discord.Interaction):
     
     # 数据获取
     fg_series = get_fear_greed_history()
-    tickers = get_sp500_tickers()  # yfinance替代
+    tickers = get_sp500_tickers()  # 静态
     print(f"股票数: {len(tickers)}")
     part20, part50 = calculate_market_participation_history(tickers)
     
@@ -194,7 +203,7 @@ async def send_update():
     
     # 数据获取
     fg_series = get_fear_greed_history()
-    tickers = get_sp500_tickers()  # yfinance
+    tickers = get_sp500_tickers()  # 静态
     part20, part50 = calculate_market_participation_history(tickers)
     
     # 即使数据不足，也发文本摘要
@@ -267,21 +276,16 @@ def get_fear_greed_history(days=HISTORY_DAYS):
     return pd.Series()
 
 def get_sp500_tickers():
-    # yfinance: 用Wikipedia动态拉S&P 500列表（可靠，无KEY）
-    try:
-        import wikipedia
-        wikipedia.set_lang('en')
-        page = wikipedia.page('List of S&P 500 companies')
-        df = pd.read_html(page.content)[0]
-        tickers = df['Symbol'].tolist()
-        # yfinance格式：替换.为-
-        tickers = [t.replace('.', '-') for t in tickers]
-        print(f"Wikipedia yfinance S&P列表成功，{len(tickers)}只股票")
-        return tickers[:50]  # 限50防慢，生产可全
-    except Exception as e:
-        print(f"yfinance S&P列表错误: {e}")
-        # fallback静态示例
-        return ['AAPL', 'MSFT', 'GOOGL', 'AMZN', 'TSLA']
+    # 静态S&P 500 tickers (前50只，避依赖；全503可扩展)
+    tickers = [
+        'AAPL', 'MSFT', 'GOOGL', 'AMZN', 'NVDA', 'META', 'TSLA', 'BRK-B', 'UNH', 'XOM',
+        'JNJ', 'V', 'PG', 'JPM', 'MA', 'HD', 'AVGO', 'CVX', 'LLY', 'ABBV',
+        'PFE', 'KO', 'BAC', 'ADBE', 'COST', 'CRM', 'NFLX', 'ACN', 'WMT', 'TMO',
+        'MRK', 'ABT', 'DIS', 'DHR', 'VZ', 'TXN', 'NEE', 'WFC', 'PM', 'ORCL',
+        'CSCO', 'INTC', 'IBM', 'NOW', 'AMGN', 'CAT', 'GS', 'RTX', 'UNP', 'HON'
+    ]
+    print(f"静态 S&P列表成功，{len(tickers)}只股票")
+    return tickers
 
 def get_historical_prices(symbol, days=HISTORY_DAYS * 2):
     try:
@@ -317,10 +321,9 @@ def calculate_market_participation_history(tickers, days=HISTORY_DAYS):
             df_up_to_date = closes[closes.index.date <= date.date()]
             if len(df_up_to_date) < 50:
                 continue
-            close = df_up_to_date.iloc[-1]
-            sma20 = df_up_to_date.rolling(20).mean().iloc[-1]
-            sma50 = df_up_to_date.rolling(50).mean().iloc[-1]
-            # 修复: 用pd.isna检查标量值
+            close = df_up_to_date.iloc[-1].item()  # 修复: .item() 确保标量
+            sma20 = df_up_to_date.rolling(20).mean().iloc[-1].item()
+            sma50 = df_up_to_date.rolling(50).mean().iloc[-1].item()
             if not pd.isna(close) and not pd.isna(sma20) and not pd.isna(sma50):
                 total += 1
                 if close > sma20:
