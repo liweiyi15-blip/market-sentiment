@@ -1,6 +1,7 @@
-discord.py
 requests
 pandas
 matplotlib
 pillow
 pytz
+discord.py
+yfinance
