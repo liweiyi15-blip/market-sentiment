@@ -241,24 +241,25 @@ async def send_update():
         print(f"自动更新失败: {e}")
 
 def get_fear_greed_history(days=HISTORY_DAYS):
-    # 尝试当前日期，回退最多3天找数据
-    for attempt in range(3):
-        today = (datetime.now(timezone.utc).date() - timedelta(days=attempt)).strftime('%Y-%m-%d')
-        start_date = (datetime.now(timezone.utc).date() - timedelta(days=days*2 + attempt)).strftime('%Y-%m-%d')
+    # 尝试当前日期，回退最多7天找数据（避未来/周末）
+    for attempt in range(7):
+        today = datetime.now(timezone.utc).date() - timedelta(days=attempt)
+        start_date = today - timedelta(days=days*2)
         url = f"https://production.dataviz.cnn.io/index/fearandgreed/graphdata/{today}"
         try:
             response = requests.get(url)
             print(f"CNN API status: {response.status_code}, text preview: {response.text[:100]}")
             if response.status_code == 200 and response.text.strip():
                 data = response.json()
-                historical = data['fear_and_greed_historical']['data']
-                df = pd.DataFrame(historical)
-                df['date'] = pd.to_datetime(df['x'], unit='ms').dt.date
-                df = df[df['date'] >= datetime.strptime(start_date, '%Y-%m-%d').date()].tail(days)
-                df = df.sort_values('date').set_index('date')
-                if len(df) > 0:
-                    print(f"F&G数据成功，{len(df)}天")
-                    return df['y']
+                if 'fear_and_greed_historical' in data and 'data' in data['fear_and_greed_historical']:
+                    historical = data['fear_and_greed_historical']['data']
+                    df = pd.DataFrame(historical)
+                    df['date'] = pd.to_datetime(df['x'], unit='ms').dt.date
+                    df = df[df['date'] >= start_date].tail(days)
+                    df = df.sort_values('date').set_index('date')
+                    if len(df) > 0:
+                        print(f"F&G数据成功，{len(df)}天 (日期: {today})")
+                        return df['y']
             else:
                 print(f"CNN尝试 {attempt+1} 失败: 空响应或非200")
         except Exception as e:
@@ -267,7 +268,8 @@ def get_fear_greed_history(days=HISTORY_DAYS):
     return pd.Series()
 
 def get_sp500_tickers():
-    url = f"https://financialmodelingprep.com/api/v3/sp500_constituent?apikey={FMP_API_KEY}"
+    # 新端点: /indexes/constituents?symbol=SPX (避legacy /sp500_constituent)
+    url = f"https://financialmodelingprep.com/api/v3/indexes/constituents?symbol=SPX&apikey={FMP_API_KEY}"
     try:
         response = requests.get(url)
         print(f"FMP API status: {response.status_code}, text preview: {response.text[:200]}")
