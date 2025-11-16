@@ -12,6 +12,8 @@ import json
 import time
 import asyncio
 import yfinance as yf  # S&P 500数据替代FMP
+import warnings  # 抑制FutureWarning
+warnings.filterwarnings("ignore", category=FutureWarning)
 
 # 配置（从环境变量读）
 BOT_TOKEN = os.getenv('BOT_TOKEN')
@@ -318,7 +320,8 @@ def calculate_market_participation_history(tickers, days=HISTORY_DAYS):
             close = df_up_to_date.iloc[-1]
             sma20 = df_up_to_date.rolling(20).mean().iloc[-1]
             sma50 = df_up_to_date.rolling(50).mean().iloc[-1]
-            if pd.notna(close) and pd.notna(sma20) and pd.notna(sma50):
+            # 修复: 用pd.isna检查标量值
+            if not pd.isna(close) and not pd.isna(sma20) and not pd.isna(sma50):
                 total += 1
                 if close > sma20:
                     above_20 += 1
