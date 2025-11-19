@@ -1,4 +1,4 @@
 discord.py
-curl-cffi
+requests
 python-dotenv
 pytz
