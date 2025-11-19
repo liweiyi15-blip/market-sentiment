@@ -1,121 +1,125 @@
 import discord
 import os
-from curl_cffi import requests # 核心修改：改用这个强力库
-import json
+from curl_cffi import requests
+from bs4 import BeautifulSoup
 import asyncio
 from discord.ext import commands, tasks
 from datetime import datetime
 import pytz
 
-# --- 1. 配置 ---
+# --- 配置 ---
 TOKEN = os.getenv("DISCORD_TOKEN")
 TARGET_CHANNEL_ID = int(os.getenv("CHANNEL_ID", "0"))
 
 intents = discord.Intents.default()
-intents.message_content = True 
+intents.message_content = True
 bot = commands.Bot(command_prefix="!", intents=intents)
 
-# --- 2. 获取数据 (抗封锁版) ---
-def get_fed_data():
+# --- 核心：抓取 Investing.com ---
+def get_investing_data():
     try:
-        url = "https://www.cmegroup.com/CmeWS/mvc/Tool/FedWatch/List"
+        url = "https://www.investing.com/central-banks/fed/rate-monitor"
         
-        # 使用 impersonate="chrome110" 模拟真实的 Chrome 浏览器
-        # 这能绕过 Railway IP 的指纹封锁
+        # 模拟真实用户访问
         response = requests.get(
             url, 
-            impersonate="chrome110", 
-            timeout=10
+            impersonate="chrome120", 
+            timeout=15
         )
         
         if response.status_code != 200:
-            return f"⚠️ 依然被拦截: 状态码 {response.status_code}"
+            return f"⚠️ 访问失败 (Code {response.status_code}): Investing.com 也可能限制了 IP"
 
-        data = response.json()
-
-        if not data:
-            return "⚠️ 数据为空"
-
-        next_meeting = data[0]
-        meeting_date_str = next_meeting.get('meetingDate', 'Unknown')
+        # 解析 HTML
+        soup = BeautifulSoup(response.text, 'html.parser')
         
-        try:
-            dt = datetime.strptime(meeting_date_str, "%d %b %Y")
-            formatted_date = dt.strftime("%Y年%m月%d日")
-        except:
-            formatted_date = meeting_date_str
+        # 1. 寻找概率表格
+        # Investing.com 的类名通常比较固定，寻找 'fedRateMonitorTable'
+        table = soup.find("table", class_="fedRateMonitorTable")
+        if not table:
+            # 尝试备用选择器（网站可能会改版）
+            return "⚠️ 抓取失败: 找不到数据表格 (网站结构可能已变)"
 
-        prob_list = next_meeting.get('groupList', [])
+        # 2. 提取数据行
+        rows = table.find('tbody').find_all('tr')
+        
         msg_body = ""
-        best_prob = 0
+        best_prob = 0.0
         best_range = "Unknown"
 
-        for item in prob_list:
-            probability = item.get('probability', 0)
-            target_range = f"{item.get('targetRangeLower')}-{item.get('targetRangeUpper')}"
-            
-            if probability > best_prob:
-                best_prob = probability
-                best_range = target_range
-            
-            if probability > 1.0:
-                msg_body += f"🔹 **{target_range} bps**: {probability:.1f}%\n"
+        # 遍历每一行 (通常第一行是当前的或者最可能的)
+        for row in rows:
+            cols = row.find_all('td')
+            if len(cols) >= 2:
+                # 格式通常是: [利率区间, 概率, ...]
+                # 例如: [4.50-4.75, 75.5%, ...]
+                rate_range = cols[0].get_text(strip=True)
+                prob_str = cols[1].get_text(strip=True).replace('%', '')
+                
+                try:
+                    prob = float(prob_str)
+                except:
+                    continue
+
+                if prob > best_prob:
+                    best_prob = prob
+                    best_range = rate_range
+                
+                # 只显示大概率的
+                if prob > 1.0:
+                    msg_body += f"🔹 **{rate_range}**: {prob}%\n"
+
+        # 3. 获取下次会议时间
+        # 尝试从页面标题或特定div获取，这里简化处理，直接提取页面上的日期信息
+        # Investing.com 页面顶部通常有 "Next Meeting: Dec 18, 2025"
+        date_info = "未知日期"
+        # 尝试找一下通用的日期容器
+        top_info = soup.find("div", class_="fedMonitorInfo")
+        if top_info:
+             # 简单的文本提取，可能包含多余空格
+            date_text = top_info.get_text()
+            if "Meeting:" in date_text:
+                 # 粗略提取
+                 date_info = date_text.split("Meeting:")[-1].strip().split("\n")[0]
 
         output = (
-            f"📊 **FEDWatch 利率预测**\n"
-            f"📅 **下次会议**: {formatted_date}\n"
+            f"📊 **Investing.com 利率观测**\n"
+            f"📅 **下次会议**: {date_info}\n"
             f"---------------------------\n"
             f"{msg_body}\n"
-            f"🔥 **当前共识**: {best_range} bps (概率 {best_prob:.1f}%)"
+            f"🔥 **当前共识**: {best_range} (概率 {best_prob}%)\n"
+            f"🔗 源: Investing.com"
         )
         return output
 
     except Exception as e:
-        return f"❌ 报错: {e}"
+        return f"❌ 解析错误: {e}"
 
-# --- 3. 定时任务 ---
+# --- 定时任务 ---
 @tasks.loop(hours=24)
 async def scheduled_task():
     channel = bot.get_channel(TARGET_CHANNEL_ID)
     if channel:
-        print(f"正在向频道 {channel.name} 发送定时消息...")
-        msg = get_fed_data()
+        msg = get_investing_data()
         tz = pytz.timezone('Asia/Shanghai')
         current_time = datetime.now(tz).strftime("%Y-%m-%d %H:%M")
         await channel.send(f"{msg}\n🕒 更新时间: {current_time}")
-    else:
-        print(f"⚠️ 定时任务失败: 无法找到频道 ID {TARGET_CHANNEL_ID}")
 
 @scheduled_task.before_loop
 async def before_task():
     await bot.wait_until_ready()
 
-# --- 4. 事件与调试 ---
 @bot.event
 async def on_ready():
     print(f'✅ 已登录: {bot.user}')
-    
-    # --- 频道 ID 调试自检 ---
-    print("--- 正在检查频道权限 ---")
-    channel = bot.get_channel(TARGET_CHANNEL_ID)
-    if channel:
-        print(f"✅ 成功找到目标频道: {channel.name} (ID: {channel.id})")
-    else:
-        print(f"❌ 失败: 机器人找不到 ID 为 {TARGET_CHANNEL_ID} 的频道。")
-        print("可能是以下原因：\n1. 机器人没有该频道的'查看频道'权限\n2. ID 填错了 (请务必复制频道ID，而不是服务器ID)")
-        print("⬇️ 机器人当前能看到的所有频道 ⬇️")
-        for guild in bot.guilds:
-            for c in guild.text_channels:
-                print(f" - {c.name}: {c.id}")
-    
     if not scheduled_task.is_running():
         scheduled_task.start()
 
 @bot.command()
 async def fed(ctx):
-    await ctx.send("🔍 正在绕过防火墙获取数据...")
-    msg = get_fed_data()
-    await ctx.send(msg)
+    msg = await ctx.send("🌍 正在前往 Investing.com 获取数据...")
+    data = get_investing_data()
+    await msg.edit(content=data)
 
 if __name__ == "__main__":
     bot.run(TOKEN)
