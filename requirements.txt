@@ -1,4 +1,3 @@
-discord.py
-yfinance
-python-dotenv
-pytz
+selenium
+requests
+webdriver-manager
