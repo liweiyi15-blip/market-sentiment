@@ -1,7 +1,12 @@
-# 使用 Python 3.9 Slim 版本 (基于 Debian)
+# 使用 Python 3.9 Slim 版本
 FROM python:3.9-slim
 
-# 1. 保持系统更新并安装必要工具 (wget 用于下载)
+# 🔥 关键修改：强制 Python 实时打印日志，不要缓存！
+ENV PYTHONUNBUFFERED=1
+# 防止 Python 生成 .pyc 文件
+ENV PYTHONDONTWRITEBYTECODE=1
+
+# 1. 安装系统依赖
 RUN apt-get update && apt-get install -y \
     wget \
     curl \
@@ -9,7 +14,7 @@ RUN apt-get update && apt-get install -y \
     gnupg \
     --no-install-recommends
 
-# 2. 安装 Google Chrome (直接下载 .deb 包安装，避开 apt-key 问题)
+# 2. 安装 Google Chrome (直接下载 .deb 包安装)
 RUN wget -q https://dl.google.com/linux/direct/google-chrome-stable_current_amd64.deb \
     && apt-get install -y ./google-chrome-stable_current_amd64.deb \
     && rm google-chrome-stable_current_amd64.deb \
