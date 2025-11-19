@@ -1,5 +1,4 @@
 discord.py
-curl-cffi
-beautifulsoup4
+yfinance
 python-dotenv
 pytz
