@@ -36,7 +36,7 @@ def get_fed_data():
 
 # --- 定时任务 ---
 # 设置每 24 小时发送一次，或者使用 @tasks.loop(hours=4)
-@tasks.loop(hours=24) 
+@tasks.loop(seconds=10) 
 async def scheduled_task():
     channel = bot.get_channel(TARGET_CHANNEL_ID)
     if channel:
