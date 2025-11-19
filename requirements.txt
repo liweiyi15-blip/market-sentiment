@@ -1,7 +1,4 @@
-requests
-pandas
-matplotlib
-pillow
-pytz
 discord.py
-yfinance
+requests
+beautifulsoup4
+python-dotenv
