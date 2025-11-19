@@ -1,12 +1,12 @@
 # 使用 Python 3.9 Slim
 FROM python:3.9-slim
 
-# 强制实时日志
+# 🔥 强制 Python 实时打印日志 (解决日志卡顿问题)
 ENV PYTHONUNBUFFERED=1
 ENV PYTHONDONTWRITEBYTECODE=1
 
 # 1. 安装系统依赖 + Chromium + Chromium Driver
-# 这一步会自动处理所有依赖，比手动安装 Chrome 稳定得多
+# 直接使用 Debian 源里的 Chromium，稳定且无需处理签名问题
 RUN apt-get update && apt-get install -y \
     chromium \
     chromium-driver \
