@@ -18,10 +18,10 @@ CHECK_INTERVAL = 7200
 PREV_TOP_PROB = None
 
 # ==========================================
-# 1. 浏览器抓取模块 (保持不变)
+# 1. 浏览器抓取模块 (智能表格定位)
 # ==========================================
 def get_data_via_selenium():
-    print(f"⚡ [{datetime.now().strftime('%H:%M')}] 启动 Chromium (智能定位模式)...")
+    print(f"⚡ [{datetime.now().strftime('%H:%M')}] 启动 Chromium...")
     
     options = Options()
     options.binary_location = "/usr/bin/chromium"
@@ -32,6 +32,7 @@ def get_data_via_selenium():
     options.add_argument("--disable-extensions")
     options.add_argument("--window-size=1920,1080")
     
+    # 去广告
     prefs = {"profile.managed_default_content_settings.images": 2}
     options.add_experimental_option("prefs", prefs)
     options.page_load_strategy = 'eager'
@@ -53,6 +54,7 @@ def get_data_via_selenium():
         current_rate = "Unknown"
         
         try:
+            # 智能寻找含有 % 的短表格
             tables = driver.find_elements(By.TAG_NAME, "table")
             target_table = None
             for tbl in tables:
@@ -98,7 +100,7 @@ def get_data_via_selenium():
             except: pass
 
 # ==========================================
-# 2. 推送模块 (按要求修改视觉)
+# 2. 推送模块 (新头像 + 无Emoji)
 # ==========================================
 def send_embed(data):
     global PREV_TOP_PROB
@@ -108,44 +110,33 @@ def send_embed(data):
     top1 = data['data'][0]
     top2 = data['data'][1] if len(data['data']) > 1 else None
     
-    # --- 逻辑判定：谁是降息，谁是维持？---
-    # 比较两个目标区间的数值大小
-    # 数值小的 = 降息 (Cut)
-    # 数值大的 = 维持 (Hold)
-    
+    # --- 逻辑判定 ---
     try:
-        # 提取区间里的第一个数字进行比较 (例如 "3.75-4.00" 取 3.75)
         val1 = float(top1['target'].split('-')[0])
         val2 = float(top2['target'].split('-')[0]) if top2 else 0
         
-        # 默认标签
         label1_suffix = ""
         label2_suffix = ""
         
         if top2:
-            if val1 < val2:
+            if val1 < val2: # Top1 是降息
                 label1_suffix = "(降息)"
                 label2_suffix = "(维持)"
-                # 既然 Top1 更小，说明市场主押降息 -> 绿色
                 consensus_text = "降息 (Cut)"
                 icon = "📉"
                 color = 0x57F287 # 绿
-            else:
+            else: # Top1 是维持
                 label1_suffix = "(维持)"
                 label2_suffix = "(降息)"
-                # 既然 Top1 更大，说明市场主押维持 -> 蓝色
                 consensus_text = "维持利率 (Hold)"
                 icon = "⏸️"
                 color = 0x3498DB # 蓝
         else:
-            # 如果只有一个选项，无法比较，默认维持
             label1_suffix = "(共识)"
             consensus_text = "趋势不明"
             icon = "⚖️"
             color = 0x3498DB
-
     except:
-        # 容错
         label1_suffix = ""
         label2_suffix = ""
         consensus_text = "未知"
@@ -163,28 +154,19 @@ def send_embed(data):
     elif delta < -0.1: trend_str, trend_emoji = f"概率下降 {abs(delta):.1f}%", "❄️"
     else: trend_str, trend_emoji = "预期保持稳定", "⚖️"
 
-    # --- 进度条 ---
     def bar(p): return "█" * int(p//10) + "░" * (10 - int(p//10))
 
-    # --- 构建 Embed 正文 ---
-    # 删掉了 "当前基准"
-    # 删掉了奖牌 emoji，换成了具体的 icon
-    
-    # 判断 Top1 图标
-    icon1 = "📉" if "降息" in label1_suffix else "⏸️"
-    
+    # --- 构建正文 ---
     desc = [
         f"**🗓️ 下次会议:** `{NEXT_MEETING_DATE}`",
         "",
-        f"{icon1} **目标: {top1['target']} {label1_suffix}**",
+        f"**目标: {top1['target']} {label1_suffix}**", 
         f"{bar(top1['prob'])} **{top1['prob']}%**",
         ""
     ]
     
     if top2:
-        # 判断 Top2 图标
-        icon2 = "📉" if "降息" in label2_suffix else "⏸️"
-        desc.append(f"{icon2} **目标: {top2['target']} {label2_suffix}**")
+        desc.append(f"**目标: {top2['target']} {label2_suffix}**")
         desc.append(f"{bar(top2['prob'])} **{top2['prob']}%**")
 
     desc.append("")
@@ -192,9 +174,10 @@ def send_embed(data):
 
     payload = {
         "username": "CME FedWatch Bot",
-        "avatar_url": "https://upload.wikimedia.org/wikipedia/commons/thumb/c/c3/CME_Group_logo.svg/1200px-CME_Group_logo.svg.png",
+        # ✅ 新头像 (已转换为直链，确保 Discord 能显示)
+        "avatar_url": "https://i.imgur.com/KLl4khv.png",
         "embeds": [{
-            "title": "🏛️ CME FedWatch™ (降息预期)", # 标题已修改
+            "title": "🏛️ CME FedWatch™ (降息预期)",
             "description": "\n".join(desc),
             "color": color,
             "fields": [
@@ -215,10 +198,10 @@ def send_embed(data):
 # 3. 主程序
 # ==========================================
 if __name__ == "__main__":
-    print("🚀 视觉最终修正版已启动...")
+    print("🚀 最终定稿版已启动...")
     data = get_data_via_selenium()
     if data: send_embed(data)
-    else: print("⚠️ 首次失败")
+    else: print("⚠️ 首次失败，等待重试")
 
     while True:
         print(f"💤 休眠 {CHECK_INTERVAL} 秒...")
