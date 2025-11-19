@@ -18,7 +18,7 @@ CHECK_INTERVAL = 7200
 PREV_TOP_PROB = None
 
 # ==========================================
-# 1. 浏览器抓取模块 (智能定位版)
+# 1. 浏览器抓取模块 (保持不变)
 # ==========================================
 def get_data_via_selenium():
     print(f"⚡ [{datetime.now().strftime('%H:%M')}] 启动 Chromium (智能定位模式)...")
@@ -32,7 +32,6 @@ def get_data_via_selenium():
     options.add_argument("--disable-extensions")
     options.add_argument("--window-size=1920,1080")
     
-    # 去广告 (加快速度)
     prefs = {"profile.managed_default_content_settings.images": 2}
     options.add_experimental_option("prefs", prefs)
     options.page_load_strategy = 'eager'
@@ -47,61 +46,30 @@ def get_data_via_selenium():
         url = "https://www.investing.com/central-banks/fed-rate-monitor"
         driver.get(url)
         
-        # 强制等待5秒让JS渲染
         print("⏳ 等待页面渲染...")
         time.sleep(5)
         
-        # --- 🔥 修复点：精准定位 ---
-        # 不再盲目抓取所有 tr，而是寻找表头里含有 "Probability" 的那个表格
         data_points = []
         current_rate = "Unknown"
         
         try:
-            # 1. 尝试找 Current Rate (增加容错)
-            try:
-                # 尝试多种 XPath 组合
-                curr_elem = driver.find_element(By.XPATH, "//*[contains(text(), 'Current Interest Rate') or contains(text(), 'Current Rate')]")
-                current_rate = curr_elem.text.split(":")[-1].strip().replace("%","")
-            except:
-                print("⚠️ 未找到 Current Rate 文本，将显示 Unknown")
-
-            # 2. 尝试找概率表
-            # 逻辑：找到页面上所有的 table，遍历它们，看谁的数据像“概率”
             tables = driver.find_elements(By.TAG_NAME, "table")
-            print(f"🔍 页面共发现 {len(tables)} 个表格")
-
             target_table = None
-            
-            for idx, tbl in enumerate(tables):
-                # 简单的启发式算法：如果这个表格行数少于 15 且包含 '%' 符号，大概率就是它
-                txt = tbl.text
-                if "%" in txt and len(tbl.find_elements(By.TAG_NAME, "tr")) < 15:
-                    print(f"✅ 锁定表格 #{idx+1} (看起来像概率表)")
+            for tbl in tables:
+                if "%" in tbl.text and len(tbl.find_elements(By.TAG_NAME, "tr")) < 15:
                     target_table = tbl
                     break
-            
-            if not target_table:
-                print("❌ 未找到符合特征的概率表，尝试抓取第一个...")
-                if tables: target_table = tables[0]
+            if not target_table and tables: target_table = tables[0]
 
             if target_table:
                 rows = target_table.find_elements(By.TAG_NAME, "tr")
-                
-                # 调试日志：打印第一行内容，方便排错
-                if len(rows) > 1:
-                    print(f"📝 表格首行预览: {rows[1].text}")
-
                 for row in rows:
                     cols = row.find_elements(By.TAG_NAME, "td")
-                    # Investing.com 的列顺序可能会变，我们自动检测
                     if len(cols) >= 2:
                         txt0 = cols[0].text.strip()
                         txt1 = cols[1].text.strip()
-                        
-                        # 逻辑：哪个带 '%', 哪个就是概率；另一个是目标
                         prob_val = 0.0
                         target_val = ""
-                        
                         try:
                             if "%" in txt0:
                                 prob_val = float(txt0.replace("%", ""))
@@ -110,34 +78,27 @@ def get_data_via_selenium():
                                 prob_val = float(txt1.replace("%", ""))
                                 target_val = txt0
                             else:
-                                continue # 这一行没有百分比，跳过
-                            
+                                continue
                             data_points.append({"prob": prob_val, "target": target_val})
                         except:
                             continue
+        except Exception as e:
+            print(f"⚠️ 解析错误: {e}")
 
-        except Exception as parse_error:
-            print(f"⚠️ 解析过程出错: {parse_error}")
-
-        if not data_points:
-            print("❌ 最终未能提取到有效数据")
-            return None
-
+        if not data_points: return None
         data_points.sort(key=lambda x: x['prob'], reverse=True)
         return {"current": current_rate, "data": data_points[:2]}
 
     except Exception as e:
-        print(f"❌ 浏览器崩溃或网络错误: {e}")
+        print(f"❌ 异常: {e}")
         return None
     finally:
         if driver:
-            try:
-                driver.quit()
-            except:
-                pass
+            try: driver.quit()
+            except: pass
 
 # ==========================================
-# 2. 推送模块
+# 2. 推送模块 (按要求修改视觉)
 # ==========================================
 def send_embed(data):
     global PREV_TOP_PROB
@@ -147,26 +108,51 @@ def send_embed(data):
     top1 = data['data'][0]
     top2 = data['data'][1] if len(data['data']) > 1 else None
     
-    status_text = "维持利率 (Hold)"
-    icon = "⏸️"
-    color = 0x3498DB
+    # --- 逻辑判定：谁是降息，谁是维持？---
+    # 比较两个目标区间的数值大小
+    # 数值小的 = 降息 (Cut)
+    # 数值大的 = 维持 (Hold)
     
     try:
-        c_val = float(data['current'].split("-")[0])
-        t_val = float(top1['target'].split("-")[0])
-        if t_val < c_val:
-            status_text = "降息 25bps (Cut)"
-            icon = "📉"
-            color = 0x57F287
-        elif t_val > c_val:
-            status_text = "加息 25bps (Hike)"
-            icon = "📈"
-            color = 0xE74C3C
-    except:
-        # 如果 Current Unknown，我们默认假设降息 (根据目前大环境)
-        # 或者直接根据 Target 是否比 4.5 低来判断
-        pass
+        # 提取区间里的第一个数字进行比较 (例如 "3.75-4.00" 取 3.75)
+        val1 = float(top1['target'].split('-')[0])
+        val2 = float(top2['target'].split('-')[0]) if top2 else 0
+        
+        # 默认标签
+        label1_suffix = ""
+        label2_suffix = ""
+        
+        if top2:
+            if val1 < val2:
+                label1_suffix = "(降息)"
+                label2_suffix = "(维持)"
+                # 既然 Top1 更小，说明市场主押降息 -> 绿色
+                consensus_text = "降息 (Cut)"
+                icon = "📉"
+                color = 0x57F287 # 绿
+            else:
+                label1_suffix = "(维持)"
+                label2_suffix = "(降息)"
+                # 既然 Top1 更大，说明市场主押维持 -> 蓝色
+                consensus_text = "维持利率 (Hold)"
+                icon = "⏸️"
+                color = 0x3498DB # 蓝
+        else:
+            # 如果只有一个选项，无法比较，默认维持
+            label1_suffix = "(共识)"
+            consensus_text = "趋势不明"
+            icon = "⚖️"
+            color = 0x3498DB
 
+    except:
+        # 容错
+        label1_suffix = ""
+        label2_suffix = ""
+        consensus_text = "未知"
+        icon = "❓"
+        color = 0x99AAB5
+
+    # --- 趋势计算 ---
     current_prob = top1['prob']
     delta = 0.0
     if PREV_TOP_PROB is not None:
@@ -177,18 +163,28 @@ def send_embed(data):
     elif delta < -0.1: trend_str, trend_emoji = f"概率下降 {abs(delta):.1f}%", "❄️"
     else: trend_str, trend_emoji = "预期保持稳定", "⚖️"
 
+    # --- 进度条 ---
     def bar(p): return "█" * int(p//10) + "░" * (10 - int(p//10))
 
+    # --- 构建 Embed 正文 ---
+    # 删掉了 "当前基准"
+    # 删掉了奖牌 emoji，换成了具体的 icon
+    
+    # 判断 Top1 图标
+    icon1 = "📉" if "降息" in label1_suffix else "⏸️"
+    
     desc = [
         f"**🗓️ 下次会议:** `{NEXT_MEETING_DATE}`",
-        f"**⚓ 当前基准:** `{data['current']}%`",
         "",
-        f"🥇 **目标: {top1['target']}**",
+        f"{icon1} **目标: {top1['target']} {label1_suffix}**",
         f"{bar(top1['prob'])} **{top1['prob']}%**",
         ""
     ]
+    
     if top2:
-        desc.append(f"🥈 **目标: {top2['target']}**")
+        # 判断 Top2 图标
+        icon2 = "📉" if "降息" in label2_suffix else "⏸️"
+        desc.append(f"{icon2} **目标: {top2['target']} {label2_suffix}**")
         desc.append(f"{bar(top2['prob'])} **{top2['prob']}%**")
 
     desc.append("")
@@ -198,12 +194,12 @@ def send_embed(data):
         "username": "CME FedWatch Bot",
         "avatar_url": "https://upload.wikimedia.org/wikipedia/commons/thumb/c/c3/CME_Group_logo.svg/1200px-CME_Group_logo.svg.png",
         "embeds": [{
-            "title": "🏛️ CME FedWatch™ 市场观察",
+            "title": "🏛️ CME FedWatch™ (降息预期)", # 标题已修改
             "description": "\n".join(desc),
             "color": color,
             "fields": [
-                {"name": f"{trend_emoji} 趋势变动", "value": f"**{status_text[:2]}{trend_str}**", "inline": True},
-                {"name": "💡 华尔街共识", "value": f"{icon} **{status_text}**", "inline": True}
+                {"name": f"{trend_emoji} 趋势变动", "value": f"**{consensus_text[:2]}{trend_str}**", "inline": True},
+                {"name": "💡 华尔街共识", "value": f"{icon} **{consensus_text}**", "inline": True}
             ],
             "footer": {"text": f"Updated at {datetime.now().strftime('%H:%M')}"}
         }]
@@ -211,7 +207,7 @@ def send_embed(data):
     
     try:
         requests.post(WEBHOOK_URL, json=payload)
-        print(f"✅ 推送成功: {status_text} | {current_prob}%")
+        print(f"✅ 推送成功: {consensus_text} | {current_prob}%")
     except Exception as e:
         print(f"❌ 推送失败: {e}")
 
@@ -219,10 +215,10 @@ def send_embed(data):
 # 3. 主程序
 # ==========================================
 if __name__ == "__main__":
-    print("🚀 智能表格定位版已启动...")
+    print("🚀 视觉最终修正版已启动...")
     data = get_data_via_selenium()
     if data: send_embed(data)
-    else: print("⚠️ 首次失败，将在下个周期重试")
+    else: print("⚠️ 首次失败")
 
     while True:
         print(f"💤 休眠 {CHECK_INTERVAL} 秒...")
