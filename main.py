@@ -1,7 +1,6 @@
 import discord
 import os
-from curl_cffi import requests
-from bs4 import BeautifulSoup
+import yfinance as yf
 import asyncio
 from discord.ext import commands, tasks
 from datetime import datetime
@@ -15,95 +14,76 @@ intents = discord.Intents.default()
 intents.message_content = True
 bot = commands.Bot(command_prefix="!", intents=intents)
 
-# --- 核心：抓取 Investing.com ---
-def get_investing_data():
+# --- 获取金融数据 ---
+def get_market_data():
     try:
-        url = "https://www.investing.com/central-banks/fed/rate-monitor"
+        # 1. 获取联邦基金期货 (ZQ=F) - 这是预测利率的核心
+        # 注意：Yahoo的数据可能有15分钟延迟，但对预测来说足够了
+        ticker_fed = yf.Ticker("ZQ=F")
+        fed_data = ticker_fed.history(period="1d")
         
-        # 模拟真实用户访问
-        response = requests.get(
-            url, 
-            impersonate="chrome120", 
-            timeout=15
-        )
+        if fed_data.empty:
+            return "⚠️ 暂时无法获取期货数据 (Yahoo API 无响应)"
         
-        if response.status_code != 200:
-            return f"⚠️ 访问失败 (Code {response.status_code}): Investing.com 也可能限制了 IP"
-
-        # 解析 HTML
-        soup = BeautifulSoup(response.text, 'html.parser')
+        # 获取最新价格
+        last_price = fed_data['Close'].iloc[-1]
         
-        # 1. 寻找概率表格
-        # Investing.com 的类名通常比较固定，寻找 'fedRateMonitorTable'
-        table = soup.find("table", class_="fedRateMonitorTable")
-        if not table:
-            # 尝试备用选择器（网站可能会改版）
-            return "⚠️ 抓取失败: 找不到数据表格 (网站结构可能已变)"
-
-        # 2. 提取数据行
-        rows = table.find('tbody').find_all('tr')
+        # === 核心计算公式 ===
+        # 市场预期的利率 = 100 - 期货价格
+        implied_rate = 100 - last_price
         
-        msg_body = ""
-        best_prob = 0.0
-        best_range = "Unknown"
+        # 2. 获取 10年期国债 (市场风向标)
+        ticker_10y = yf.Ticker("^TNX")
+        tnx_data = ticker_10y.history(period="1d")
+        tnx_rate = tnx_data['Close'].iloc[-1] if not tnx_data.empty else 0
 
-        # 遍历每一行 (通常第一行是当前的或者最可能的)
-        for row in rows:
-            cols = row.find_all('td')
-            if len(cols) >= 2:
-                # 格式通常是: [利率区间, 概率, ...]
-                # 例如: [4.50-4.75, 75.5%, ...]
-                rate_range = cols[0].get_text(strip=True)
-                prob_str = cols[1].get_text(strip=True).replace('%', '')
-                
-                try:
-                    prob = float(prob_str)
-                except:
-                    continue
+        # 3. 获取 2年期国债 (对政策最敏感)
+        ticker_2y = yf.Ticker("^IRX") # 通常用 IRX (13周) 或其他代码代替
+        # 注: Yahoo 上 2年期代码不稳定，这里用 13周(^IRX) 作为短端利率参考
+        irx_ticker = yf.Ticker("^IRX")
+        irx_data = irx_ticker.history(period="1d")
+        short_rate = irx_data['Close'].iloc[-1] if not irx_data.empty else 0
 
-                if prob > best_prob:
-                    best_prob = prob
-                    best_range = rate_range
-                
-                # 只显示大概率的
-                if prob > 1.0:
-                    msg_body += f"🔹 **{rate_range}**: {prob}%\n"
-
-        # 3. 获取下次会议时间
-        # 尝试从页面标题或特定div获取，这里简化处理，直接提取页面上的日期信息
-        # Investing.com 页面顶部通常有 "Next Meeting: Dec 18, 2025"
-        date_info = "未知日期"
-        # 尝试找一下通用的日期容器
-        top_info = soup.find("div", class_="fedMonitorInfo")
-        if top_info:
-             # 简单的文本提取，可能包含多余空格
-            date_text = top_info.get_text()
-            if "Meeting:" in date_text:
-                 # 粗略提取
-                 date_info = date_text.split("Meeting:")[-1].strip().split("\n")[0]
+        # 4. 生成分析文案
+        # 简单的趋势判断
+        trend = ""
+        # 假设当前基础利率约 4.5% (需根据实际调整，这里仅作基准对比)
+        current_base_rate = 4.50 
+        
+        diff = implied_rate - current_base_rate
+        if diff < -0.1:
+            trend = "📉 市场正在押注 **降息**"
+        elif diff > 0.1:
+            trend = "📈 市场正在押注 **加息**"
+        else:
+            trend = "⚖️ 市场预期 **维持利率不变**"
 
         output = (
-            f"📊 **Investing.com 利率观测**\n"
-            f"📅 **下次会议**: {date_info}\n"
+            f"💵 **Fed 利率市场预期 (Yahoo源)**\n"
             f"---------------------------\n"
-            f"{msg_body}\n"
-            f"🔥 **当前共识**: {best_range} (概率 {best_prob}%)\n"
-            f"🔗 源: Investing.com"
+            f"📊 **联邦基金期货 (ZQ)**: {last_price:.2f}\n"
+            f"🔮 **市场隐含利率**: `{implied_rate:.2f}%`\n"
+            f"💡 **信号**: {trend}\n\n"
+            f"**参考指标**:\n"
+            f"• 短期国债 (13周): {short_rate:.2f}%\n"
+            f"• 长期国债 (10年): {tnx_rate:.2f}%\n"
+            f"---------------------------\n"
+            f"*(注: 隐含利率 < 当前利率 即代表降息预期)*"
         )
         return output
 
     except Exception as e:
-        return f"❌ 解析错误: {e}"
+        return f"❌ 数据获取错误: {e}"
 
 # --- 定时任务 ---
 @tasks.loop(hours=24)
 async def scheduled_task():
     channel = bot.get_channel(TARGET_CHANNEL_ID)
     if channel:
-        msg = get_investing_data()
+        msg = get_market_data()
         tz = pytz.timezone('Asia/Shanghai')
         current_time = datetime.now(tz).strftime("%Y-%m-%d %H:%M")
-        await channel.send(f"{msg}\n🕒 更新时间: {current_time}")
+        await channel.send(f"{msg}\n🕒 更新: {current_time}")
 
 @scheduled_task.before_loop
 async def before_task():
@@ -117,8 +97,8 @@ async def on_ready():
 
 @bot.command()
 async def fed(ctx):
-    msg = await ctx.send("🌍 正在前往 Investing.com 获取数据...")
-    data = get_investing_data()
+    msg = await ctx.send("🔄 正在从 Yahoo Finance 计算隐含利率...")
+    data = get_market_data()
     await msg.edit(content=data)
 
 if __name__ == "__main__":
