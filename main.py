@@ -10,7 +10,7 @@ import pytz
 # --- 配置部分 ---
 TOKEN = os.getenv("DISCORD_TOKEN")
 # 目标频道ID (在Discord开启开发者模式，右键频道复制ID)
-TARGET_CHANNEL_ID = int(os.getenv("1439550818448838746", "0")) 
+TARGET_CHANNEL_ID = int(os.getenv("CHANNEL_ID", "0")) 
 
 # 设置 Bot
 intents = discord.Intents.default()
