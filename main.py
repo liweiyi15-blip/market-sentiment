@@ -20,7 +20,7 @@ from selenium.webdriver.common.by import By
 # ⚙️ 全局配置区
 # ==========================================
 
-WEBHOOK_URL = os.getenv("WEBHOOK_URL") # 请确保环境变量中有这个，或者直接填字符串
+WEBHOOK_URL = os.getenv("WEBHOOK_URL") # 记得设置环境变量
 NEXT_MEETING_DATE = "2025-12-10"
 
 # ⏰ 时间表 (美东时间 ET)
@@ -50,7 +50,7 @@ def get_bar(p):
 
 def get_market_sentiment(p):
     """
-    【保留设定】去掉 '市场' 二字，只留状态词
+    【保留设定】去掉 '市场' 二字
     """
     if p > 80: return "🔥🔥 **深度火热**"
     if p > 60: return "🔥 **火热**"      
@@ -64,7 +64,7 @@ def get_market_sentiment(p):
 def get_fed_data():
     print(f"⚡ 启动 Chromium 抓取 FedWatch...")
     options = Options()
-    options.binary_location = "/usr/bin/chromium" # 本地运行时若不需要可注释
+    options.binary_location = "/usr/bin/chromium" 
     options.add_argument("--headless=new") 
     options.add_argument("--no-sandbox")
     options.add_argument("--disable-dev-shm-usage")
@@ -152,24 +152,21 @@ def send_fed_embed(data):
     except Exception as e: print(f"❌ 推送失败: {e}")
 
 # ==========================================
-# 🔵 模块 2: 市场广度 (修改了标题、样本数、页脚)
+# 🔵 模块 2: 市场广度 (统计样本移至Footer)
 # ==========================================
 def generate_breadth_chart(breadth_20_series, breadth_50_series):
     """生成市场广度折线图"""
     plt.style.use('dark_background')
     fig, ax = plt.subplots(figsize=(10, 5))
     
-    # 绘制 20日线 (黄色)
     ax.plot(breadth_20_series.index, breadth_20_series.values, 
             color='#f1c40f', linewidth=2, label='Stocks > 20 Day SMA %')
     
-    # 绘制 50日线 (红色)
     ax.plot(breadth_50_series.index, breadth_50_series.values, 
             color='#e74c3c', linewidth=2, label='Stocks > 50 Day SMA %')
     
     ax.fill_between(breadth_20_series.index, breadth_20_series.values, alpha=0.1, color='#f1c40f')
     
-    # 绘制阈值线
     ax.axhline(y=80, color='#ff5252', linestyle='--', linewidth=1, alpha=0.8) 
     ax.text(breadth_20_series.index[0], 81, 'Overbought (80%)', color='#ff5252', fontsize=8)
     
@@ -235,9 +232,9 @@ def run_breadth_task():
             "username": BREADTH_BOT_NAME,
             "avatar_url": BREADTH_BOT_AVATAR,
             "embeds": [{
-                "title": "S&P 500 市场广度",  # 【修改】指定标题
-                "description": f"**日期:** `{datetime.now().strftime('%Y-%m-%d')}`\n"
-                               f"**统计样本:** `{len(tickers)}`\n\n" # 【修改】加回统计样本数
+                "title": "S&P 500 市场广度",
+                # 【修改】移除了这里的“统计样本”行
+                "description": f"**日期:** `{datetime.now().strftime('%Y-%m-%d')}`\n\n"
                                f"**股价 > 20日均线:** **{current_p20:.1f}%**\n"
                                f"{sentiment_20}\n\n"
                                f"**股价 > 50日均线:** **{current_p50:.1f}%**\n"
@@ -245,8 +242,8 @@ def run_breadth_task():
                 "color": 0xF1C40F,
                 "image": {"url": "attachment://chart.png"},
                 "footer": {
-                    # 【修改】更新为您指定的说明文案
-                    "text": "💡 标普500大于20日、50日均的数量\n💡 >80% 警惕回调，<20% 孕育反弹。"
+                    # 【修改】统计样本数加在这里，说明的下面
+                    "text": f"💡 标普500大于20日、50日均的数量\n💡 >80% 警惕回调，<20% 孕育反弹。\n（统计样本: {len(tickers)}成分股）"
                 }
             }]
         }
