@@ -47,10 +47,10 @@ def get_bar(p):
     return "█" * int(p//10) + "░" * (10 - int(p//10))
 
 def get_market_status(p):
-    """根据百分比判断市场冷热"""
+    """根据百分比判断市场冷热 (无Emoji前缀版)"""
     if p > 80: return "🔥 **市场火热**"
     if p < 20: return "❄️ **市场冰冷**"
-    return "" # 中间状态不显示，保持简洁
+    return "" # 中间状态保持空白
 
 # ==========================================
 # 🟢 模块 1: 降息概率 (Selenium)
@@ -153,8 +153,8 @@ def run_breadth_task():
     print("📊 启动市场广度统计...")
     
     try:
-        # 1. 获取标普500名单 (伪装浏览器抓取 Wikipedia)
-        print("📥 获取成分股名单...")
+        # 1. 获取标普500名单
+        print("📥 获取成分股名单 (智能匹配表格)...")
         try:
             url = 'https://en.wikipedia.org/wiki/List_of_S%26P_500_companies'
             headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'}
@@ -162,9 +162,21 @@ def run_breadth_task():
             resp = requests.get(url, headers=headers, timeout=10)
             resp.raise_for_status()
             
-            table = pd.read_html(io.StringIO(resp.text))
-            tickers = table[0]['Symbol'].tolist()
-            tickers = [t.replace('.', '-') for t in tickers] # 修正 BRK.B -> BRK-B
+            # 读取所有表格
+            tables = pd.read_html(io.StringIO(resp.text))
+            
+            # 👇👇👇 关键修复：遍历所有表格，找到包含 'Symbol' 列的那个 👇👇👇
+            df_tickers = None
+            for df in tables:
+                if 'Symbol' in df.columns:
+                    df_tickers = df
+                    break
+            
+            if df_tickers is None:
+                raise ValueError("未在页面中找到包含 Symbol 的表格")
+
+            tickers = df_tickers['Symbol'].tolist()
+            tickers = [t.replace('.', '-') for t in tickers] 
             print(f"✅ 成功获取 {len(tickers)} 只成分股")
             
         except Exception as e:
@@ -179,23 +191,26 @@ def run_breadth_task():
         if 'Close' in data.columns:
             closes = data['Close']
         else:
-            closes = data # 如果只有1只股票的情况
+            closes = data
 
         # 3. 计算指标
         current_prices = closes.iloc[-1]
         ma50 = closes.rolling(window=50).mean().iloc[-1]
         ma200 = closes.rolling(window=200).mean().iloc[-1]
         
-        above_50 = (current_prices > ma50).sum()
-        above_200 = (current_prices > ma200).sum()
-        total_valid = closes.shape[1]
+        # 过滤掉无效数据 (NaN)
+        valid_data = current_prices.notna() & ma50.notna() & ma200.notna()
+        
+        above_50 = (current_prices[valid_data] > ma50[valid_data]).sum()
+        above_200 = (current_prices[valid_data] > ma200[valid_data]).sum()
+        total_valid = valid_data.sum()
         
         if total_valid == 0: return
 
         p50 = (above_50 / total_valid) * 100
         p200 = (above_200 / total_valid) * 100
         
-        # 4. 构建 Embed (应用你的样式要求)
+        # 4. 构建 Embed (纯净版样式)
         status_50 = get_market_status(p50)
         status_200 = get_market_status(p200)
 
@@ -223,7 +238,7 @@ def run_breadth_task():
 # 🚀 主程序
 # ==========================================
 if __name__ == "__main__":
-    print("🚀 机器人启动 (样式优化版)")
+    print("🚀 机器人启动 (表格识别修复版)")
     
     print("🧪 启动测试：立即发送一次广度报告...")
     run_breadth_task()
@@ -247,4 +262,4 @@ if __name__ == "__main__":
                 run_breadth_task()
             
             last_run_time_str = current_str
-        time
+        time.sleep(30)
