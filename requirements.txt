@@ -5,3 +5,4 @@ holidays
 yfinance
 pandas
 lxml
+matplotlib
