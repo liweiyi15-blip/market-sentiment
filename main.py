@@ -3,6 +3,8 @@ import requests
 import os
 import pytz
 import holidays
+import pandas as pd
+import yfinance as yf
 from datetime import datetime
 from selenium import webdriver
 from selenium.webdriver.chrome.service import Service
@@ -13,11 +15,9 @@ from selenium.webdriver.common.by import By
 # ⚙️ 全局配置区
 # ==========================================
 
-# 🔑 密钥与 URL
 WEBHOOK_URL = os.getenv("WEBHOOK_URL") 
-FMP_API_KEY = os.getenv("FMP_API_KEY") 
+# 注意：本版本彻底移除了 FMP_API_KEY，因为改用免费的 Yahoo 源
 
-# 📅 下次美联储会议时间
 NEXT_MEETING_DATE = "2025-12-10"
 
 # ⏰ 时间表 (美东时间 ET)
@@ -46,7 +46,7 @@ def get_bar(p):
     return "█" * int(p//10) + "░" * (10 - int(p//10))
 
 # ==========================================
-# 🟢 模块 1: 降息概率 (Selenium)
+# 🟢 模块 1: 降息概率 (Selenium) - 保持不变
 # ==========================================
 def get_fed_data():
     print(f"⚡ 启动 Chromium 抓取 FedWatch...")
@@ -62,13 +62,12 @@ def get_fed_data():
     try:
         service = Service("/usr/bin/chromedriver")
         driver = webdriver.Chrome(service=service, options=options)
-        driver.set_page_load_timeout(30)
+        driver.set_page_load_timeout(45) # 稍微增加超时
         
         driver.get("https://www.investing.com/central-banks/fed-rate-monitor")
-        time.sleep(5)
+        time.sleep(8) # 等待页面加载
         
         data_points = []
-        current_rate = "Unknown"
         
         tables = driver.find_elements(By.TAG_NAME, "table")
         target_table = None
@@ -93,7 +92,7 @@ def get_fed_data():
         
         if not data_points: return None
         data_points.sort(key=lambda x: x['prob'], reverse=True)
-        return {"current": current_rate, "data": data_points[:2]}
+        return {"current": "Unknown", "data": data_points[:2]}
 
     except Exception as e:
         print(f"❌ Selenium 抓取错误: {e}")
@@ -141,73 +140,68 @@ def send_fed_embed(data):
     except Exception as e: print(f"❌ 推送失败: {e}")
 
 # ==========================================
-# 🔵 模块 2: 市场广度 (Github List + FMP Price)
+# 🔵 模块 2: 市场广度 (Yahoo Finance 免费版)
 # ==========================================
 def run_breadth_task():
-    print("📊 启动市场广度统计 (GitHub源 + FMP报价)...")
-    if not FMP_API_KEY:
-        print("❌ 错误: 未设置 FMP_API_KEY")
-        return
-
+    print("📊 启动市场广度统计 (Yahoo Finance)...")
+    
     try:
-        # 1. 【关键修改】从 GitHub 获取免费的 SP500 列表
-        # 彻底绕过 FMP 的收费列表接口
-        github_list_url = "https://raw.githubusercontent.com/rreichel3/US-Stock-Symbols/main/all/sp500_tickers.json"
-        print(f"📥 正在下载成分股名单: {github_list_url}")
+        # 1. 获取标普500名单 (从维基百科抓取，最稳)
+        print("📥 正在获取成分股名单 (Wikipedia)...")
+        try:
+            # Pandas 自动解析网页表格
+            table = pd.read_html('https://en.wikipedia.org/wiki/List_of_S%26P_500_companies')
+            df_tickers = table[0]
+            tickers = df_tickers['Symbol'].tolist()
+            # 修正符号: Yahoo使用 'BRK-B' 而不是 'BRK.B'
+            tickers = [t.replace('.', '-') for t in tickers]
+        except Exception as e:
+            print(f"❌ 维基百科抓取失败: {e}, 使用备用列表")
+            tickers = ['AAPL', 'MSFT', 'NVDA', 'AMZN', 'GOOGL', 'META', 'TSLA', 'BRK-B', 'LLY', 'AVGO']
+
+        print(f"✅ 准备下载 {len(tickers)} 只股票数据...")
         
-        resp = requests.get(github_list_url, timeout=10)
-        if resp.status_code != 200:
-            print("❌ 无法从 GitHub 获取列表，尝试备用源...")
-            # 备用：只测几大权重股，保证不报错
-            tickers = ['AAPL', 'MSFT', 'NVDA', 'AMZN', 'GOOGL', 'META', 'TSLA', 'BRK.B', 'LLY', 'AVGO', 'JPM', 'V', 'UNH']
+        # 2. 批量下载数据 (Yahoo Finance)
+        # 下载过去 300 天的数据，足以计算 200日均线
+        data = yf.download(tickers, period="1y", progress=False)
+        
+        # 只取收盘价
+        if 'Close' in data.columns:
+            closes = data['Close']
         else:
-            tickers = resp.json()
-
-        print(f"✅ 获取到 {len(tickers)} 只成分股，开始向 FMP 查询价格...")
-        
-        # 2. 批量向 FMP 查询价格 (这是允许的)
-        batch_size = 50 # 降低每批数量，提高稳定性
-        above_50, above_200, total = 0, 0, 0
-        
-        for i in range(0, len(tickers), batch_size):
-            batch = ",".join(tickers[i:i+batch_size])
-            # 这里的 endpoint 是 quote，Starter 用户可用
-            url = f"https://financialmodelingprep.com/api/v3/quote/{batch}?apikey={FMP_API_KEY}"
+            closes = data
             
-            try:
-                q_res = requests.get(url, timeout=10)
-                if q_res.status_code == 200:
-                    q_data = q_res.json()
-                    if isinstance(q_data, list):
-                        for stock in q_data:
-                            p = stock.get('price')
-                            ma50 = stock.get('priceAvg50')
-                            ma200 = stock.get('priceAvg200')
-                            
-                            if p and ma50 and ma200:
-                                total += 1
-                                if p > ma50: above_50 += 1
-                                if p > ma200: above_200 += 1
-                else:
-                    print(f"⚠️ 批次查询 FMP 失败: {q_res.text}")
-            except Exception as e:
-                print(f"⚠️ 网络波动跳过一批: {e}")
-                continue
+        print("✅ 数据下载完成，正在计算均线...")
 
-        if total == 0:
-            print("⚠️ 未获取到有效数据")
+        # 3. 计算指标
+        # 获取最新价格 (最后一行)
+        current_prices = closes.iloc[-1]
+        
+        # 计算均线 (利用 Pandas 强大的整表计算)
+        # axis=0 表示按列(每只股票)计算
+        ma50 = closes.rolling(window=50).mean().iloc[-1]
+        ma200 = closes.rolling(window=200).mean().iloc[-1]
+        
+        # 统计
+        above_50 = (current_prices > ma50).sum()
+        above_200 = (current_prices > ma200).sum()
+        total_valid = closes.shape[1] # 列数即为股票数
+        
+        if total_valid == 0:
+            print("⚠️ 有效数据为 0")
             return
 
-        p50 = (above_50 / total) * 100
-        p200 = (above_200 / total) * 100
+        p50 = (above_50 / total_valid) * 100
+        p200 = (above_200 / total_valid) * 100
         
+        # 4. 推送
         payload = {
             "username": BREADTH_BOT_NAME,
             "avatar_url": BREADTH_BOT_AVATAR,
             "embeds": [{
                 "title": "📊 S&P 500 市场广度",
                 "description": f"**日期:** `{datetime.now().strftime('%Y-%m-%d')}`\n"
-                               f"*(美股收盘统计)*\n\n"
+                               f"*(数据源: Yahoo Finance)*\n\n"
                                f"🟢 **股价 > 50日均线:** **{p50:.1f}%**\n"
                                f"{get_bar(p50)}\n"
                                f"*(中期趋势判断)*\n\n"
@@ -215,20 +209,20 @@ def run_breadth_task():
                                f"{get_bar(p200)}\n"
                                f"*(长期牛熊分界)*",
                 "color": 0xF1C40F,
-                "footer": {"text": f"统计样本: {total} 只 (Source: GitHub List + FMP Quote)"}
+                "footer": {"text": f"统计样本: {total_valid} 只成分股"}
             }]
         }
         requests.post(WEBHOOK_URL, json=payload)
         print(f"✅ 广度报告已推送: >50MA={p50:.1f}%")
 
     except Exception as e:
-        print(f"❌ 任务异常: {e}")
+        print(f"❌ 广度任务异常: {e}")
 
 # ==========================================
 # 🚀 主程序
 # ==========================================
 if __name__ == "__main__":
-    print("🚀 机器人启动 (GitHub列表源版)")
+    print("🚀 机器人启动 (Yahoo源终极版)")
     
     print("🧪 启动测试：立即发送一次广度报告...")
     run_breadth_task()
@@ -243,6 +237,7 @@ if __name__ == "__main__":
 
         if current_str != last_run_time_str:
             print(f"⏰ {current_str} ET (Holiday: {is_holiday})")
+            
             if not is_holiday and current_str in FED_SCHEDULE_TIMES:
                 data = get_fed_data()
                 if data: send_fed_embed(data)
