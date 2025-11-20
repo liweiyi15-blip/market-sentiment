@@ -9,7 +9,7 @@ import io
 import json
 import warnings
 import re
-import shutil # 用于清理缓存
+import shutil 
 import matplotlib.pyplot as plt
 import matplotlib.dates as mdates
 from datetime import datetime, timedelta
@@ -24,7 +24,7 @@ from selenium.webdriver.common.by import By
 
 WEBHOOK_URL = os.getenv("WEBHOOK_URL") 
 NEXT_MEETING_DATE = "2025-12-10"
-DEFAULT_BASE_RATE = 3.75 # 最后的最后，如果全网都挂了，才用这个
+DEFAULT_BASE_RATE = 3.75 
 
 # ⏰ 时间表 (美东时间 ET)
 FED_SCHEDULE_TIMES = ["08:31", "09:31", "11:31", "13:31", "15:31"]
@@ -34,13 +34,15 @@ BREADTH_SCHEDULE_TIME = "16:30"
 # 🏛️ FedWatch 配置
 # ------------------------------------------
 FED_BOT_NAME = "CME FedWatch Bot"
-FED_BOT_AVATAR = "https://i.imgur.com/E9KAPsn.png"
+# 【已更新】FedWatch 新头像
+FED_BOT_AVATAR = "https://i.imgur.com/d8KLt6Z.png"
 
 # ------------------------------------------
 # 📊 市场广度 配置
 # ------------------------------------------
 BREADTH_BOT_NAME = "标普500 广度日报" 
-BREADTH_BOT_AVATAR = "https://i.imgur.com/Segc5PF.png" 
+# 【已更新】市场广度 新头像 (.jpeg)
+BREADTH_BOT_AVATAR = "https://i.imgur.com/Segc5PF.jpeg" 
 
 PREV_CUT_PROB = None
 
@@ -72,7 +74,7 @@ def format_target_label(target_str, current_rate_base):
         return target_str
 
 # ==========================================
-# 🟢 模块 1: 降息概率 (智能正则抓取版)
+# 🟢 模块 1: 降息概率 (智能正则 + 校验 + 双保险)
 # ==========================================
 
 def fetch_backup_rate_from_tradingeconomics(driver):
@@ -82,30 +84,25 @@ def fetch_backup_rate_from_tradingeconomics(driver):
         driver.get("https://tradingeconomics.com/united-states/interest-rate")
         time.sleep(5)
         
-        # 1. 找到包含 "Fed Interest Rate" 的整行元素
-        # 只要这行存在，我们就能拿到里面的所有文本
+        # 找到包含 "Fed Interest Rate" 的整行元素
         row_element = driver.find_element(By.XPATH, "//tr[contains(., 'Fed Interest Rate')]")
         row_text = row_element.text
         print(f"🔍 [Plan B] 扫描到行文本: {row_text}")
         
-        # 2. 使用正则提取第一个看起来像利率的浮点数 (e.g., 4.00, 3.75)
-        # \d+\.\d+ 匹配小数
+        # 提取第一个看起来像利率的浮点数
         match = re.search(r"(\d+\.\d+)", row_text)
         
         if match:
             rate_text = match.group(1)
             upper_bound = float(rate_text)
             
-            # 校验：利率不太可能超过 10% 或低于 0% (防止抓到奇怪的数字)
+            # 校验：利率范围保护
             if 0.0 <= upper_bound <= 10.0:
                 lower_bound = upper_bound - 0.25
                 print(f"✅ [Plan B] 正则抓取成功: 上限 {upper_bound}%, 推算下限 {lower_bound}%")
                 return lower_bound
             else:
                 print(f"⚠️ [Plan B] 抓到的数字 {upper_bound} 不像利率，跳过")
-        else:
-            print("⚠️ [Plan B] 这行里没找到数字")
-            
         return None
     except Exception as e:
         print(f"❌ [Plan B] 失败: {e}")
@@ -140,7 +137,7 @@ def get_fed_data():
             match = re.search(r"Current.*?Rate.*?(\d+\.?\d*)", page_text, re.IGNORECASE | re.DOTALL)
             if match:
                 val = float(match.group(1))
-                # 只有在 3.0 - 6.0 之间才信，防止抓到 "1.0%"
+                # 只有在 3.0 - 6.0 之间才信
                 if 3.0 <= val <= 6.0:
                     detected_base_rate = val
                     print(f"✅ [Plan A] 抓取成功: {detected_base_rate}%")
@@ -175,9 +172,8 @@ def get_fed_data():
         except Exception as e:
             print(f"❌ 概率表格抓取错误: {e}")
 
-        # --- Plan B: TradingEconomics (如果 Plan A 失败) ---
+        # --- Plan B & 兜底 ---
         if detected_base_rate is None:
-            # 只要概率表抓到了，就值得去 Plan B 跑一趟
             if data_points:
                 backup_rate = fetch_backup_rate_from_tradingeconomics(driver)
                 if backup_rate:
@@ -303,8 +299,6 @@ def run_breadth_task():
             tickers = ['AAPL', 'MSFT', 'NVDA', 'AMZN', 'GOOGL', 'META', 'TSLA', 'BRK-B', 'LLY', 'AVGO']
 
         warnings.simplefilter(action='ignore', category=FutureWarning)
-        
-        # 尝试清理 yfinance 可能的缓存锁
         try:
             if os.path.exists('yfinance.cache'): shutil.rmtree('yfinance.cache')
         except: pass
@@ -357,7 +351,7 @@ def run_breadth_task():
 if __name__ == "__main__":
     print("🚀 监控服务已启动")
     
-    print("🧪 [测试] 正在发送 FedWatch (正则提取版)...")
+    print("🧪 [测试] 正在发送 FedWatch (含修复头像+全自动修复)...")
     fed_data = get_fed_data()
     if fed_data: 
         send_fed_embed(fed_data)
