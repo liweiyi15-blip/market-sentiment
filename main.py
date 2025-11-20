@@ -31,8 +31,9 @@ BREADTH_SCHEDULE_TIME = "16:30"
 FED_BOT_NAME = "🏛️ 美联储利率观察"
 FED_BOT_AVATAR = "https://cdn-icons-png.flaticon.com/512/2156/2156009.png" 
 
-BREADTH_BOT_NAME = "📊 标普500 广度日报"
-BREADTH_BOT_AVATAR = "https://cdn-icons-png.flaticon.com/512/3310/3310665.png" 
+# 👇👇👇 修改了名字 (去掉emoji) 和 头像 (新链接) 👇👇👇
+BREADTH_BOT_NAME = "标普500 广度日报" 
+BREADTH_BOT_AVATAR = "https://i.imgur.com/Segc5PF.png" 
 
 PREV_CUT_PROB = None
 
@@ -53,10 +54,10 @@ def get_market_sentiment(p):
     根据百分比判断市场情绪 (5级分类)
     """
     if p > 80: return "🔥🔥 **深度火热**"
-    if p > 60: return "🔥 **市场火热**"
+    if p > 60: return "🔥 **火热**"
     if p < 20: return "❄️❄️ **深度寒冷**"
-    if p < 40: return "❄️ **市场寒冷**"
-    return "🍃 **市场稳定**"
+    if p < 40: return "❄️ **寒冷**"
+    return "🍃 **稳定**"
 
 # ==========================================
 # 🟢 模块 1: 降息概率 (Selenium)
@@ -152,10 +153,10 @@ def send_fed_embed(data):
     except Exception as e: print(f"❌ 推送失败: {e}")
 
 # ==========================================
-# 🔵 模块 2: 市场广度 (布局调整版)
+# 🔵 模块 2: 市场广度 (换头像/标题 + 紧凑布局)
 # ==========================================
 def generate_breadth_chart(breadth_20_series, breadth_50_series):
-    """生成市场广度折线图，同时显示 20日和 50日线"""
+    """生成市场广度折线图"""
     plt.style.use('dark_background')
     fig, ax = plt.subplots(figsize=(10, 5))
     
@@ -191,7 +192,7 @@ def generate_breadth_chart(breadth_20_series, breadth_50_series):
     return buf
 
 def run_breadth_task():
-    print("📊 启动市场广度统计 (布局调整版)...")
+    print("📊 启动市场广度统计 (更新UI版)...")
     
     try:
         # 1. 获取名单
@@ -243,7 +244,7 @@ def run_breadth_task():
         # 4. 生成图片
         chart_buffer = generate_breadth_chart(recent_breadth_20, recent_breadth_50)
         
-        # 5. 发送 (Footer调整)
+        # 5. 发送
         sentiment_20 = get_market_sentiment(current_p20)
         sentiment_50 = get_market_sentiment(current_p50)
 
@@ -251,19 +252,17 @@ def run_breadth_task():
             "username": BREADTH_BOT_NAME,
             "avatar_url": BREADTH_BOT_AVATAR,
             "embeds": [{
-                "title": "📊 S&P 500 市场广度",
+                # 👇👇👇 标题去掉了 📊 👇👇👇
+                "title": "S&P 500 市场广度",
                 "description": f"**日期:** `{datetime.now().strftime('%Y-%m-%d')}`\n\n"
-                               f"**股价 > 20日均线:** **{current_p20:.1f}%**\n"  # 改回正常加粗 **
-                               f"{sentiment_20}\n"
-                               f"*(短期趋势)*\n\n"
+                               f"**股价 > 20日均线:** **{current_p20:.1f}%**\n"
+                               f"{sentiment_20} *(短期趋势)*\n\n"
                                f"**股价 > 50日均线:** **{current_p50:.1f}%**\n"
-                               f"{sentiment_50}\n"
-                               f"*(中期趋势)*",
+                               f"{sentiment_50} *(中期趋势)*",
                 "color": 0xF1C40F,
                 "image": {"url": "attachment://chart.png"},
                 "footer": {
-                    # 这里是原来的统计样本位置，替换为小白说明
-                    "text": "💡 比例越高，说明普涨；比例越低，说明大部分在跌。\n>80% 警惕回调，<20% 孕育反弹。"
+                    "text": "💡 比例越高，说明普涨；比例越低，说明大部分在跌。\n💡 >80% 警惕回调，<20% 孕育反弹。"
                 }
             }]
         }
@@ -282,7 +281,7 @@ def run_breadth_task():
 # 🚀 主程序
 # ==========================================
 if __name__ == "__main__":
-    print("🚀 机器人启动 (Footer说明版)")
+    print("🚀 机器人启动 (Visual Update)")
     
     print("🧪 启动测试：立即发送...")
     run_breadth_task()
