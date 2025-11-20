@@ -9,6 +9,7 @@ import io
 import json
 import warnings
 import re
+import shutil # 用于清理缓存
 import matplotlib.pyplot as plt
 import matplotlib.dates as mdates
 from datetime import datetime, timedelta
@@ -23,8 +24,7 @@ from selenium.webdriver.common.by import By
 
 WEBHOOK_URL = os.getenv("WEBHOOK_URL") 
 NEXT_MEETING_DATE = "2025-12-10"
-# 【重要】默认基准利率（当自动抓取失效或离谱时使用此值）
-DEFAULT_BASE_RATE = 3.75 
+DEFAULT_BASE_RATE = 3.75 # 最后的最后，如果全网都挂了，才用这个
 
 # ⏰ 时间表 (美东时间 ET)
 FED_SCHEDULE_TIMES = ["08:31", "09:31", "11:31", "13:31", "15:31"]
@@ -34,7 +34,6 @@ BREADTH_SCHEDULE_TIME = "16:30"
 # 🏛️ FedWatch 配置
 # ------------------------------------------
 FED_BOT_NAME = "CME FedWatch Bot"
-# 【已修正】必须使用 .png 结尾的直链，不能用 /a/ 相册链
 FED_BOT_AVATAR = "https://i.imgur.com/E9KAPsn.png"
 
 # ------------------------------------------
@@ -60,13 +59,9 @@ def get_bar(p):
     return "█" * filled + "░" * (length - filled)
 
 def format_target_label(target_str, current_rate_base):
-    """
-    全自动判断逻辑
-    """
+    """ 全自动判断逻辑 """
     try:
         lower_bound = float(target_str.split('-')[0].strip())
-        
-        # 允许0.05的误差范围
         if abs(lower_bound - current_rate_base) <= 0.05:
             return f"{target_str} (维持)"
         elif lower_bound < current_rate_base:
@@ -77,26 +72,41 @@ def format_target_label(target_str, current_rate_base):
         return target_str
 
 # ==========================================
-# 🟢 模块 1: 降息概率 (含安全校验)
+# 🟢 模块 1: 降息概率 (智能正则抓取版)
 # ==========================================
 
 def fetch_backup_rate_from_tradingeconomics(driver):
-    """ Plan B: TradingEconomics """
-    print("🔄 [Plan B] 正在尝试 TradingEconomics...")
+    """ Plan B: 暴力扫描整行，正则提取数字 """
+    print("🔄 [Plan B] 正在尝试 TradingEconomics (正则模式)...")
     try:
         driver.get("https://tradingeconomics.com/united-states/interest-rate")
         time.sleep(5)
-        try:
-            element = driver.find_element(By.XPATH, "//tr[contains(., 'Fed Interest Rate')]//td[2]")
-            rate_text = element.text.strip()
-        except:
-            element = driver.find_element(By.ID, "last_last")
-            rate_text = element.text.strip()
+        
+        # 1. 找到包含 "Fed Interest Rate" 的整行元素
+        # 只要这行存在，我们就能拿到里面的所有文本
+        row_element = driver.find_element(By.XPATH, "//tr[contains(., 'Fed Interest Rate')]")
+        row_text = row_element.text
+        print(f"🔍 [Plan B] 扫描到行文本: {row_text}")
+        
+        # 2. 使用正则提取第一个看起来像利率的浮点数 (e.g., 4.00, 3.75)
+        # \d+\.\d+ 匹配小数
+        match = re.search(r"(\d+\.\d+)", row_text)
+        
+        if match:
+            rate_text = match.group(1)
+            upper_bound = float(rate_text)
             
-        upper_bound = float(rate_text)
-        lower_bound = upper_bound - 0.25
-        print(f"✅ [Plan B] 抓取成功: {lower_bound}%")
-        return lower_bound
+            # 校验：利率不太可能超过 10% 或低于 0% (防止抓到奇怪的数字)
+            if 0.0 <= upper_bound <= 10.0:
+                lower_bound = upper_bound - 0.25
+                print(f"✅ [Plan B] 正则抓取成功: 上限 {upper_bound}%, 推算下限 {lower_bound}%")
+                return lower_bound
+            else:
+                print(f"⚠️ [Plan B] 抓到的数字 {upper_bound} 不像利率，跳过")
+        else:
+            print("⚠️ [Plan B] 这行里没找到数字")
+            
+        return None
     except Exception as e:
         print(f"❌ [Plan B] 失败: {e}")
         return None
@@ -110,9 +120,7 @@ def get_fed_data():
     options.add_argument("--disable-dev-shm-usage")
     options.add_argument("--disable-gpu")
     options.add_argument("--disable-blink-features=AutomationControlled")
-    options.add_argument("user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36")
-    options.add_experimental_option("excludeSwitches", ["enable-automation"])
-    options.add_experimental_option('useAutomationExtension', False)
+    options.add_argument("user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64)")
 
     driver = None
     detected_base_rate = None
@@ -120,28 +128,26 @@ def get_fed_data():
     try:
         service = Service("/usr/bin/chromedriver") 
         driver = webdriver.Chrome(service=service, options=options)
-        driver.execute_script("Object.defineProperty(navigator, 'webdriver', {get: () => undefined})")
         driver.set_page_load_timeout(60)
         
         driver.get("https://www.investing.com/central-banks/fed-rate-monitor")
         time.sleep(5) 
         
-        # --- 尝试从主站抓取利率 (含合理性校验) ---
+        # --- Plan A: Investing.com (含范围校验) ---
         try:
             page_text = driver.find_element(By.TAG_NAME, "body").text
-            # 寻找 "Current ... Rate"
+            # 尝试抓取 Current ... Rate
             match = re.search(r"Current.*?Rate.*?(\d+\.?\d*)", page_text, re.IGNORECASE | re.DOTALL)
             if match:
                 val = float(match.group(1))
-                # 【关键修复】校验抓到的数字是否合理 (3.0% - 6.0%)
-                # 防止抓到网页里其他无关的 "1.0%"
+                # 只有在 3.0 - 6.0 之间才信，防止抓到 "1.0%"
                 if 3.0 <= val <= 6.0:
                     detected_base_rate = val
-                    print(f"✅ [Plan A] 检测到有效利率: {detected_base_rate}%")
+                    print(f"✅ [Plan A] 抓取成功: {detected_base_rate}%")
                 else:
-                    print(f"⚠️ [Plan A] 抓取到异常数值 ({val}%)，已忽略，将使用兜底值。")
-        except Exception as e:
-            print(f"⚠️ [Plan A] 提取失败: {e}")
+                    print(f"⚠️ [Plan A] 数字异常 ({val}%)，放弃")
+        except:
+            pass
 
         # --- 抓取概率表格 ---
         data_points = []
@@ -169,29 +175,23 @@ def get_fed_data():
         except Exception as e:
             print(f"❌ 概率表格抓取错误: {e}")
 
-        # --- Plan B & 兜底逻辑 ---
+        # --- Plan B: TradingEconomics (如果 Plan A 失败) ---
         if detected_base_rate is None:
-            # 只有在 data_points 已经抓到的情况下才去 Plan B，避免浪费时间
+            # 只要概率表抓到了，就值得去 Plan B 跑一趟
             if data_points:
                 backup_rate = fetch_backup_rate_from_tradingeconomics(driver)
-                if backup_rate and 3.0 <= backup_rate <= 6.0:
+                if backup_rate:
                     detected_base_rate = backup_rate
                 else:
-                    detected_base_rate = DEFAULT_BASE_RATE # 最终兜底 (3.75)
-                    print(f"⚠️ [兜底] 无法检测有效利率，强制使用: {detected_base_rate}%")
+                    detected_base_rate = DEFAULT_BASE_RATE
+                    print(f"⚠️ [最终兜底] 使用默认值: {detected_base_rate}%")
             else:
                  detected_base_rate = DEFAULT_BASE_RATE
 
-        if not data_points: 
-            print("❌ 未能抓取到任何概率数据")
-            return None
-            
+        if not data_points: return None
         data_points.sort(key=lambda x: x['prob'], reverse=True)
         
-        return {
-            "current_base_rate": detected_base_rate, 
-            "data": data_points[:2]
-        }
+        return {"current_base_rate": detected_base_rate, "data": data_points[:2]}
 
     except Exception as e:
         print(f"❌ Selenium 致命错误: {e}")
@@ -224,13 +224,9 @@ def send_fed_embed(data):
         trend_icon = "❄️"
     
     label1_raw = format_target_label(top1['target'], base_rate)
-    
-    if "(维持)" in label1_raw:
-        consensus_short = "⏸️ 维持利率 (Hold)"
-    elif "(降息)" in label1_raw:
-        consensus_short = "📉 降息 (Cut)"
-    else:
-        consensus_short = "📈 加息 (Hike)"
+    if "(维持)" in label1_raw: consensus_short = "⏸️ 维持利率 (Hold)"
+    elif "(降息)" in label1_raw: consensus_short = "📉 降息 (Cut)"
+    else: consensus_short = "📈 加息 (Hike)"
 
     desc_lines = [f"**🗓️ 下次会议:** `{NEXT_MEETING_DATE}`\n"]
     desc_lines.append(f"**目标: {label1_raw}**")
@@ -266,26 +262,19 @@ def send_fed_embed(data):
 def generate_breadth_chart(breadth_20_series, breadth_50_series):
     plt.style.use('dark_background')
     fig, ax = plt.subplots(figsize=(10, 5))
-    
-    ax.plot(breadth_20_series.index, breadth_20_series.values, 
-            color='#f1c40f', linewidth=2, label='Stocks > 20 Day SMA %')
-    ax.plot(breadth_50_series.index, breadth_50_series.values, 
-            color='#e74c3c', linewidth=2, label='Stocks > 50 Day SMA %')
+    ax.plot(breadth_20_series.index, breadth_20_series.values, color='#f1c40f', linewidth=2, label='Stocks > 20 Day SMA %')
+    ax.plot(breadth_50_series.index, breadth_50_series.values, color='#e74c3c', linewidth=2, label='Stocks > 50 Day SMA %')
     ax.fill_between(breadth_20_series.index, breadth_20_series.values, alpha=0.1, color='#f1c40f')
-    
     ax.axhline(y=80, color='#ff5252', linestyle='--', linewidth=1, alpha=0.8) 
     ax.text(breadth_20_series.index[0], 81, 'Overbought (80%)', color='#ff5252', fontsize=8)
     ax.axhline(y=20, color='#448aff', linestyle='--', linewidth=1, alpha=0.8) 
     ax.text(breadth_20_series.index[0], 21, 'Oversold (20%)', color='#448aff', fontsize=8)
-    
     ax.set_title('S&P 500 Market Breadth (20 & 50 Day SMA)', fontsize=12, color='white', pad=15)
     ax.set_ylim(0, 100)
     ax.grid(True, linestyle=':', alpha=0.3)
-    
     ax.xaxis.set_major_formatter(mdates.DateFormatter('%b %Y'))
     plt.xticks(rotation=0)
     ax.legend(loc='upper left', frameon=True, facecolor='#2f3136', edgecolor='#2f3136', labelcolor='white')
-    
     buf = io.BytesIO()
     plt.savefig(buf, format='png', bbox_inches='tight', dpi=100, facecolor='#2b2d31')
     buf.seek(0)
@@ -315,9 +304,12 @@ def run_breadth_task():
 
         warnings.simplefilter(action='ignore', category=FutureWarning)
         
-        # 解决 database locked 问题：尝试不使用共享缓存（如果不生效，可忽略，通常只是警告）
+        # 尝试清理 yfinance 可能的缓存锁
+        try:
+            if os.path.exists('yfinance.cache'): shutil.rmtree('yfinance.cache')
+        except: pass
+
         data = yf.download(tickers, period="1y", progress=False) 
-        
         if 'Close' in data.columns: closes = data['Close']
         else: closes = data
 
@@ -365,7 +357,7 @@ def run_breadth_task():
 if __name__ == "__main__":
     print("🚀 监控服务已启动")
     
-    print("🧪 [测试] 正在发送 FedWatch (含智能校验)...")
+    print("🧪 [测试] 正在发送 FedWatch (正则提取版)...")
     fed_data = get_fed_data()
     if fed_data: 
         send_fed_embed(fed_data)
@@ -387,14 +379,11 @@ if __name__ == "__main__":
 
         if current_str != last_run_time_str:
             print(f"⏰ {current_str} ET")
-            
             if not is_holiday and current_str in FED_SCHEDULE_TIMES:
                 data = get_fed_data()
                 if data: send_fed_embed(data)
-            
             if not is_holiday and current_str == BREADTH_SCHEDULE_TIME:
                 run_breadth_task()
-            
             last_run_time_str = current_str
         
         time.sleep(30)
