@@ -20,7 +20,7 @@ from selenium.webdriver.common.by import By
 # ⚙️ 全局配置区
 # ==========================================
 
-WEBHOOK_URL = os.getenv("WEBHOOK_URL") # 记得设置环境变量或直接填 URL
+WEBHOOK_URL = os.getenv("WEBHOOK_URL") # 请确保环境变量中有这个，或者直接填字符串
 NEXT_MEETING_DATE = "2025-12-10"
 
 # ⏰ 时间表 (美东时间 ET)
@@ -50,13 +50,13 @@ def get_bar(p):
 
 def get_market_sentiment(p):
     """
-    【已修改】去掉 '市场' 二字
+    【保留设定】去掉 '市场' 二字，只留状态词
     """
     if p > 80: return "🔥🔥 **深度火热**"
-    if p > 60: return "🔥 **火热**"      # 原：市场火热
+    if p > 60: return "🔥 **火热**"      
     if p < 20: return "❄️❄️ **深度寒冷**"
-    if p < 40: return "❄️ **寒冷**"      # 原：市场寒冷
-    return "🍃 **稳定**"             # 原：市场稳定
+    if p < 40: return "❄️ **寒冷**"      
+    return "🍃 **稳定**"             
 
 # ==========================================
 # 🟢 模块 1: 降息概率 (Selenium)
@@ -64,7 +64,7 @@ def get_market_sentiment(p):
 def get_fed_data():
     print(f"⚡ 启动 Chromium 抓取 FedWatch...")
     options = Options()
-    options.binary_location = "/usr/bin/chromium" # 如果在本地跑，可能需要把这行注释掉或改路径
+    options.binary_location = "/usr/bin/chromium" # 本地运行时若不需要可注释
     options.add_argument("--headless=new") 
     options.add_argument("--no-sandbox")
     options.add_argument("--disable-dev-shm-usage")
@@ -73,7 +73,6 @@ def get_fed_data():
 
     driver = None
     try:
-        # 注意：如果是在本地 Windows/Mac 跑，可能不需要指定 service 路径，或者路径不同
         service = Service("/usr/bin/chromedriver") 
         driver = webdriver.Chrome(service=service, options=options)
         driver.set_page_load_timeout(45)
@@ -153,7 +152,7 @@ def send_fed_embed(data):
     except Exception as e: print(f"❌ 推送失败: {e}")
 
 # ==========================================
-# 🔵 模块 2: 市场广度 (图表 + 简略文案)
+# 🔵 模块 2: 市场广度 (修改了标题、样本数、页脚)
 # ==========================================
 def generate_breadth_chart(breadth_20_series, breadth_50_series):
     """生成市场广度折线图"""
@@ -225,7 +224,7 @@ def run_breadth_task():
         # 4. 生成图表
         chart_buffer = generate_breadth_chart(daily_breadth_20.tail(252), daily_breadth_50.tail(252))
         
-        # 5. 准备文案 (已移除“市场”二字 和 “短期/中期趋势”描述)
+        # 5. 准备文案
         current_p20 = daily_breadth_20.iloc[-1]
         current_p50 = daily_breadth_50.iloc[-1]
         
@@ -236,16 +235,18 @@ def run_breadth_task():
             "username": BREADTH_BOT_NAME,
             "avatar_url": BREADTH_BOT_AVATAR,
             "embeds": [{
-                "title": "S&P 500 广度",
-                "description": f"**日期:** `{datetime.now().strftime('%Y-%m-%d')}`\n\n"
+                "title": "S&P 500 市场广度",  # 【修改】指定标题
+                "description": f"**日期:** `{datetime.now().strftime('%Y-%m-%d')}`\n"
+                               f"**统计样本:** `{len(tickers)}`\n\n" # 【修改】加回统计样本数
                                f"**股价 > 20日均线:** **{current_p20:.1f}%**\n"
-                               f"{sentiment_20}\n\n"  # 这里移除了 (短期趋势)
+                               f"{sentiment_20}\n\n"
                                f"**股价 > 50日均线:** **{current_p50:.1f}%**\n"
-                               f"{sentiment_50}",     # 这里移除了 (中期趋势)
+                               f"{sentiment_50}",
                 "color": 0xF1C40F,
                 "image": {"url": "attachment://chart.png"},
                 "footer": {
-                    "text": "💡 >80% 超买区 | <20% 超卖区"
+                    # 【修改】更新为您指定的说明文案
+                    "text": "💡 标普500大于20日、50日均的数量\n💡 >80% 警惕回调，<20% 孕育反弹。"
                 }
             }]
         }
@@ -263,10 +264,9 @@ def run_breadth_task():
 if __name__ == "__main__":
     print("🚀 监控服务已启动")
     
-    # 测试模式：直接运行一次
+    # 测试模式
     print("🧪 测试运行中...")
     run_breadth_task()
-    # get_fed_data() 可以按需取消注释测试
     print("✅ 测试结束，挂机中...")
 
     last_run_time_str = ""
@@ -279,12 +279,10 @@ if __name__ == "__main__":
         if current_str != last_run_time_str:
             print(f"⏰ {current_str} ET")
             
-            # 触发 FedWatch
             if not is_holiday and current_str in FED_SCHEDULE_TIMES:
                 data = get_fed_data()
                 if data: send_fed_embed(data)
             
-            # 触发 市场广度
             if not is_holiday and current_str == BREADTH_SCHEDULE_TIME:
                 run_breadth_task()
             
