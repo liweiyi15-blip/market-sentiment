@@ -6,8 +6,11 @@ import holidays
 import pandas as pd
 import yfinance as yf
 import io
+import json
 import warnings
-from datetime import datetime
+import matplotlib.pyplot as plt
+import matplotlib.dates as mdates
+from datetime import datetime, timedelta
 from selenium import webdriver
 from selenium.webdriver.chrome.service import Service
 from selenium.webdriver.chrome.options import Options
@@ -43,14 +46,12 @@ def is_market_holiday(now_et):
     return False, None
 
 def get_bar(p):
-    """Fed机器人仍需使用进度条，保留此函数"""
     return "█" * int(p//10) + "░" * (10 - int(p//10))
 
 def get_market_status(p):
-    """根据百分比判断市场冷热 (无Emoji前缀版)"""
     if p > 80: return "🔥 **市场火热**"
     if p < 20: return "❄️ **市场冰冷**"
-    return "" # 中间状态保持空白
+    return ""
 
 # ==========================================
 # 🟢 模块 1: 降息概率 (Selenium)
@@ -75,7 +76,6 @@ def get_fed_data():
         time.sleep(8)
         
         data_points = []
-        
         tables = driver.find_elements(By.TAG_NAME, "table")
         target_table = None
         for tbl in tables:
@@ -115,7 +115,7 @@ def send_fed_embed(data):
     
     top1 = data['data'][0]
     cut_prob_value = top1['prob'] 
-
+    
     delta = 0.0
     if PREV_CUT_PROB is not None: delta = cut_prob_value - PREV_CUT_PROB
     PREV_CUT_PROB = cut_prob_value
@@ -147,89 +147,129 @@ def send_fed_embed(data):
     except Exception as e: print(f"❌ 推送失败: {e}")
 
 # ==========================================
-# 🔵 模块 2: 市场广度 (Yahoo Finance)
+# 🔵 模块 2: 市场广度 (折线图版)
 # ==========================================
+def generate_breadth_chart(breadth_series):
+    """生成市场广度折线图"""
+    # 设置绘图风格 (类似 Discord 深色模式)
+    plt.style.use('dark_background')
+    fig, ax = plt.subplots(figsize=(10, 5))
+    
+    # 绘制数据线
+    ax.plot(breadth_series.index, breadth_series.values, color='#f1c40f', linewidth=2, label='Stocks > 50SMA %')
+    
+    # 填充颜色 (下方淡黄)
+    ax.fill_between(breadth_series.index, breadth_series.values, alpha=0.1, color='#f1c40f')
+    
+    # 绘制阈值线
+    ax.axhline(y=80, color='#ff5252', linestyle='--', linewidth=1, alpha=0.8) # 80% 火热
+    ax.text(breadth_series.index[0], 81, 'Overbought (80%)', color='#ff5252', fontsize=8)
+    
+    ax.axhline(y=20, color='#448aff', linestyle='--', linewidth=1, alpha=0.8) # 20% 冰冷
+    ax.text(breadth_series.index[0], 21, 'Oversold (20%)', color='#448aff', fontsize=8)
+    
+    # 格式化
+    ax.set_title('S&P 500 Market Breadth (Stocks > 50 Day SMA)', fontsize=12, color='white', pad=15)
+    ax.set_ylim(0, 100)
+    ax.grid(True, linestyle=':', alpha=0.3)
+    
+    # 日期格式
+    ax.xaxis.set_major_formatter(mdates.DateFormatter('%b %Y'))
+    plt.xticks(rotation=0)
+    
+    # 保存到内存
+    buf = io.BytesIO()
+    plt.savefig(buf, format='png', bbox_inches='tight', dpi=100, facecolor='#2b2d31')
+    buf.seek(0)
+    plt.close()
+    return buf
+
 def run_breadth_task():
-    print("📊 启动市场广度统计...")
+    print("📊 启动市场广度统计 (含历史回溯)...")
     
     try:
-        # 1. 获取标普500名单
-        print("📥 获取成分股名单 (智能匹配表格)...")
+        # 1. 获取名单
+        print("📥 获取成分股名单...")
         try:
             url = 'https://en.wikipedia.org/wiki/List_of_S%26P_500_companies'
             headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'}
-            
             resp = requests.get(url, headers=headers, timeout=10)
-            resp.raise_for_status()
-            
-            # 读取所有表格
             tables = pd.read_html(io.StringIO(resp.text))
             
-            # 👇👇👇 关键修复：遍历所有表格，找到包含 'Symbol' 列的那个 👇👇👇
             df_tickers = None
             for df in tables:
                 if 'Symbol' in df.columns:
                     df_tickers = df
                     break
+            if df_tickers is None: raise ValueError("No Symbol table found")
             
-            if df_tickers is None:
-                raise ValueError("未在页面中找到包含 Symbol 的表格")
-
-            tickers = df_tickers['Symbol'].tolist()
-            tickers = [t.replace('.', '-') for t in tickers] 
-            print(f"✅ 成功获取 {len(tickers)} 只成分股")
-            
-        except Exception as e:
-            print(f"❌ 抓取列表失败: {e}, 使用备用列表")
+            tickers = [t.replace('.', '-') for t in df_tickers['Symbol'].tolist()]
+            print(f"✅ 获取到 {len(tickers)} 只成分股")
+        except:
             tickers = ['AAPL', 'MSFT', 'NVDA', 'AMZN', 'GOOGL', 'META', 'TSLA', 'BRK-B', 'LLY', 'AVGO']
 
-        # 2. 批量下载数据
+        # 2. 下载历史数据 (2年数据，确保能算出过去1年的200日均线)
         warnings.simplefilter(action='ignore', category=FutureWarning)
-        print(f"📥 下载 {len(tickers)} 只股票数据...")
-        data = yf.download(tickers, period="1y", progress=False)
+        print("📥 下载历史数据 (这可能需要 30-60 秒)...")
         
-        if 'Close' in data.columns:
-            closes = data['Close']
-        else:
-            closes = data
+        # 下载 Close 价格
+        data = yf.download(tickers, period="2y", progress=False)
+        if 'Close' in data.columns: closes = data['Close']
+        else: closes = data
+            
+        print("✅ 数据下载完成，开始全量回测计算...")
 
-        # 3. 计算指标
-        current_prices = closes.iloc[-1]
-        ma50 = closes.rolling(window=50).mean().iloc[-1]
-        ma200 = closes.rolling(window=200).mean().iloc[-1]
+        # 3. 计算历史广度 (矩阵运算)
+        # 计算所有股票每一天的 50日均线 & 200日均线
+        sma50_df = closes.rolling(window=50).mean()
+        sma200_df = closes.rolling(window=200).mean()
         
-        # 过滤掉无效数据 (NaN)
-        valid_data = current_prices.notna() & ma50.notna() & ma200.notna()
+        # 比较：收盘价 > 均线 (得到 True/False 矩阵)
+        above50_matrix = closes > sma50_df
+        above200_matrix = closes > sma200_df
         
-        above_50 = (current_prices[valid_data] > ma50[valid_data]).sum()
-        above_200 = (current_prices[valid_data] > ma200[valid_data]).sum()
-        total_valid = valid_data.sum()
+        # 按行求和 (每天有多少个True) / 有效列数
+        # count(axis=1) 计算每天有多少只股票有数据 (排除停牌/未上市)
+        daily_breadth_50 = (above50_matrix.sum(axis=1) / closes.notna().sum(axis=1)) * 100
+        daily_breadth_200 = (above200_matrix.sum(axis=1) / closes.notna().sum(axis=1)) * 100
         
-        if total_valid == 0: return
+        # 取最近一年的数据用于画图，取最新一天的数据用于报告
+        recent_breadth_50 = daily_breadth_50.tail(252) # 约1年交易日
+        
+        current_p50 = daily_breadth_50.iloc[-1]
+        current_p200 = daily_breadth_200.iloc[-1]
+        
+        # 4. 生成图片
+        chart_buffer = generate_breadth_chart(recent_breadth_50)
+        
+        # 5. 发送 (带附件的复杂请求)
+        status_50 = get_market_status(current_p50)
+        status_200 = get_market_status(current_p200)
 
-        p50 = (above_50 / total_valid) * 100
-        p200 = (above_200 / total_valid) * 100
-        
-        # 4. 构建 Embed (纯净版样式)
-        status_50 = get_market_status(p50)
-        status_200 = get_market_status(p200)
-
-        payload = {
+        # 构造 multipart/form-data
+        payload_data = {
             "username": BREADTH_BOT_NAME,
             "avatar_url": BREADTH_BOT_AVATAR,
             "embeds": [{
                 "title": "📊 S&P 500 市场广度",
                 "description": f"**日期:** `{datetime.now().strftime('%Y-%m-%d')}`\n\n"
-                               f"**股价 > 50日均线:** **{p50:.1f}%** {status_50}\n"
+                               f"**股价 > 50日均线:** **{current_p50:.1f}%** {status_50}\n"
                                f"*(中期趋势)*\n\n"
-                               f"**股价 > 200日均线:** **{p200:.1f}%** {status_200}\n"
+                               f"**股价 > 200日均线:** **{current_p200:.1f}%** {status_200}\n"
                                f"*(长期牛熊)*",
                 "color": 0xF1C40F,
-                "footer": {"text": f"统计样本: {total_valid} 只成分股"}
+                "image": {"url": "attachment://chart.png"}, # 引用附件
+                "footer": {"text": f"统计样本: {len(tickers)} 只成分股"}
             }]
         }
-        requests.post(WEBHOOK_URL, json=payload)
-        print(f"✅ 广度报告已推送: >50MA={p50:.1f}%")
+        
+        files = {
+            'file': ('chart.png', chart_buffer, 'image/png')
+        }
+        
+        # Discord Webhook 发附件需要把 JSON 放在 'payload_json' 字段里
+        requests.post(WEBHOOK_URL, data={'payload_json': json.dumps(payload_data)}, files=files)
+        print(f"✅ 广度报告(含图表)已推送: >50MA={current_p50:.1f}%")
 
     except Exception as e:
         print(f"❌ 广度任务异常: {e}")
@@ -238,9 +278,9 @@ def run_breadth_task():
 # 🚀 主程序
 # ==========================================
 if __name__ == "__main__":
-    print("🚀 机器人启动 (表格识别修复版)")
+    print("🚀 机器人启动 (历史折线图版)")
     
-    print("🧪 启动测试：立即发送一次广度报告...")
+    print("🧪 启动测试：生成并发送图表...")
     run_breadth_task()
     print("✅ 测试结束，进入监听...")
 
