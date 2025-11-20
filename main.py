@@ -20,7 +20,7 @@ from selenium.webdriver.common.by import By
 # ⚙️ 全局配置区
 # ==========================================
 
-WEBHOOK_URL = os.getenv("WEBHOOK_URL") 
+WEBHOOK_URL = os.getenv("WEBHOOK_URL") # 记得设置环境变量或直接填 URL
 NEXT_MEETING_DATE = "2025-12-10"
 
 # ⏰ 时间表 (美东时间 ET)
@@ -31,7 +31,6 @@ BREADTH_SCHEDULE_TIME = "16:30"
 FED_BOT_NAME = "🏛️ 美联储利率观察"
 FED_BOT_AVATAR = "https://cdn-icons-png.flaticon.com/512/2156/2156009.png" 
 
-# 👇👇👇 修改了名字 (去掉emoji) 和 头像 (新链接) 👇👇👇
 BREADTH_BOT_NAME = "标普500 广度日报" 
 BREADTH_BOT_AVATAR = "https://i.imgur.com/Segc5PF.png" 
 
@@ -51,13 +50,13 @@ def get_bar(p):
 
 def get_market_sentiment(p):
     """
-    根据百分比判断市场情绪 (5级分类)
+    【已修改】去掉 '市场' 二字
     """
     if p > 80: return "🔥🔥 **深度火热**"
-    if p > 60: return "🔥 **火热**"
+    if p > 60: return "🔥 **火热**"      # 原：市场火热
     if p < 20: return "❄️❄️ **深度寒冷**"
-    if p < 40: return "❄️ **寒冷**"
-    return "🍃 **稳定**"
+    if p < 40: return "❄️ **寒冷**"      # 原：市场寒冷
+    return "🍃 **稳定**"             # 原：市场稳定
 
 # ==========================================
 # 🟢 模块 1: 降息概率 (Selenium)
@@ -65,7 +64,7 @@ def get_market_sentiment(p):
 def get_fed_data():
     print(f"⚡ 启动 Chromium 抓取 FedWatch...")
     options = Options()
-    options.binary_location = "/usr/bin/chromium"
+    options.binary_location = "/usr/bin/chromium" # 如果在本地跑，可能需要把这行注释掉或改路径
     options.add_argument("--headless=new") 
     options.add_argument("--no-sandbox")
     options.add_argument("--disable-dev-shm-usage")
@@ -74,7 +73,8 @@ def get_fed_data():
 
     driver = None
     try:
-        service = Service("/usr/bin/chromedriver")
+        # 注意：如果是在本地 Windows/Mac 跑，可能不需要指定 service 路径，或者路径不同
+        service = Service("/usr/bin/chromedriver") 
         driver = webdriver.Chrome(service=service, options=options)
         driver.set_page_load_timeout(45)
         
@@ -145,7 +145,7 @@ def send_fed_embed(data):
             "title": "🏛️ CME FedWatch™ (降息预期)",
             "description": "\n".join(desc),
             "color": 0x3498DB,
-            "fields": [{"name": "📊 趋势变动", "value": trend_str, "inline": True}],
+            "fields": [{"name": "📊 变动", "value": trend_str, "inline": True}],
             "footer": {"text": f"Updated at {datetime.now().strftime('%H:%M')} ET"}
         }]
     }
@@ -153,7 +153,7 @@ def send_fed_embed(data):
     except Exception as e: print(f"❌ 推送失败: {e}")
 
 # ==========================================
-# 🔵 模块 2: 市场广度 (换头像/标题 + 紧凑布局)
+# 🔵 模块 2: 市场广度 (图表 + 简略文案)
 # ==========================================
 def generate_breadth_chart(breadth_20_series, breadth_50_series):
     """生成市场广度折线图"""
@@ -192,59 +192,43 @@ def generate_breadth_chart(breadth_20_series, breadth_50_series):
     return buf
 
 def run_breadth_task():
-    print("📊 启动市场广度统计 (更新UI版)...")
+    print("📊 启动市场广度统计...")
     
     try:
         # 1. 获取名单
-        print("📥 获取成分股名单...")
         try:
             url = 'https://en.wikipedia.org/wiki/List_of_S%26P_500_companies'
-            headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'}
+            headers = {'User-Agent': 'Mozilla/5.0'}
             resp = requests.get(url, headers=headers, timeout=10)
-            resp.raise_for_status()
-            
             tables = pd.read_html(io.StringIO(resp.text))
-            df_tickers = None
-            for df in tables:
-                if 'Symbol' in df.columns:
-                    df_tickers = df
-                    break
+            df_tickers = next((df for df in tables if 'Symbol' in df.columns), None)
             
             if df_tickers is None: raise ValueError("未找到表格")
             tickers = [t.replace('.', '-') for t in df_tickers['Symbol'].tolist()] 
-            print(f"✅ 获取到 {len(tickers)} 只成分股")
         except:
+            print("⚠️ 无法获取完整列表，使用默认头部科技股替代")
             tickers = ['AAPL', 'MSFT', 'NVDA', 'AMZN', 'GOOGL', 'META', 'TSLA', 'BRK-B', 'LLY', 'AVGO']
 
-        # 2. 下载历史数据
+        # 2. 下载数据
         warnings.simplefilter(action='ignore', category=FutureWarning)
-        print(f"📥 下载数据...")
         data = yf.download(tickers, period="1y", progress=False) 
         if 'Close' in data.columns: closes = data['Close']
         else: closes = data
 
-        # 3. 计算历史广度
+        # 3. 计算指标
         sma20_df = closes.rolling(window=20).mean()
         sma50_df = closes.rolling(window=50).mean()
         
-        above20_matrix = closes > sma20_df
-        above50_matrix = closes > sma50_df
+        daily_breadth_20 = ((closes > sma20_df).sum(axis=1) / closes.notna().sum(axis=1)) * 100
+        daily_breadth_50 = ((closes > sma50_df).sum(axis=1) / closes.notna().sum(axis=1)) * 100
         
-        daily_breadth_20 = (above20_matrix.sum(axis=1) / closes.notna().sum(axis=1)) * 100
-        daily_breadth_50 = (above50_matrix.sum(axis=1) / closes.notna().sum(axis=1)) * 100
+        # 4. 生成图表
+        chart_buffer = generate_breadth_chart(daily_breadth_20.tail(252), daily_breadth_50.tail(252))
         
-        # 画图数据
-        recent_breadth_20 = daily_breadth_20.tail(252).dropna()
-        recent_breadth_50 = daily_breadth_50.tail(252).dropna()
-        
-        # 最新值
+        # 5. 准备文案 (已移除“市场”二字 和 “短期/中期趋势”描述)
         current_p20 = daily_breadth_20.iloc[-1]
         current_p50 = daily_breadth_50.iloc[-1]
         
-        # 4. 生成图片
-        chart_buffer = generate_breadth_chart(recent_breadth_20, recent_breadth_50)
-        
-        # 5. 发送
         sentiment_20 = get_market_sentiment(current_p20)
         sentiment_50 = get_market_sentiment(current_p50)
 
@@ -252,27 +236,23 @@ def run_breadth_task():
             "username": BREADTH_BOT_NAME,
             "avatar_url": BREADTH_BOT_AVATAR,
             "embeds": [{
-                # 👇👇👇 标题去掉了 📊 👇👇👇
-                "title": "S&P 500 市场广度",
+                "title": "S&P 500 广度",
                 "description": f"**日期:** `{datetime.now().strftime('%Y-%m-%d')}`\n\n"
                                f"**股价 > 20日均线:** **{current_p20:.1f}%**\n"
-                               f"{sentiment_20} *(短期趋势)*\n\n"
+                               f"{sentiment_20}\n\n"  # 这里移除了 (短期趋势)
                                f"**股价 > 50日均线:** **{current_p50:.1f}%**\n"
-                               f"{sentiment_50} *(中期趋势)*",
+                               f"{sentiment_50}",     # 这里移除了 (中期趋势)
                 "color": 0xF1C40F,
                 "image": {"url": "attachment://chart.png"},
                 "footer": {
-                    "text": "💡 比例越高，说明普涨；比例越低，说明大部分在跌。\n💡 >80% 警惕回调，<20% 孕育反弹。"
+                    "text": "💡 >80% 超买区 | <20% 超卖区"
                 }
             }]
         }
         
-        files = {
-            'file': ('chart.png', chart_buffer, 'image/png')
-        }
-        
+        files = {'file': ('chart.png', chart_buffer, 'image/png')}
         requests.post(WEBHOOK_URL, data={'payload_json': json.dumps(payload_data)}, files=files)
-        print(f"✅ 广度报告已推送: 20MA={current_p20:.1f}%, 50MA={current_p50:.1f}%")
+        print(f"✅ 广度报告已推送")
 
     except Exception as e:
         print(f"❌ 广度任务异常: {e}")
@@ -281,11 +261,13 @@ def run_breadth_task():
 # 🚀 主程序
 # ==========================================
 if __name__ == "__main__":
-    print("🚀 机器人启动 (Visual Update)")
+    print("🚀 监控服务已启动")
     
-    print("🧪 启动测试：立即发送...")
+    # 测试模式：直接运行一次
+    print("🧪 测试运行中...")
     run_breadth_task()
-    print("✅ 测试结束，进入监听...")
+    # get_fed_data() 可以按需取消注释测试
+    print("✅ 测试结束，挂机中...")
 
     last_run_time_str = ""
     while True:
@@ -295,14 +277,17 @@ if __name__ == "__main__":
         is_holiday, _ = is_market_holiday(now_et)
 
         if current_str != last_run_time_str:
-            print(f"⏰ {current_str} ET (Holiday: {is_holiday})")
+            print(f"⏰ {current_str} ET")
             
+            # 触发 FedWatch
             if not is_holiday and current_str in FED_SCHEDULE_TIMES:
                 data = get_fed_data()
                 if data: send_fed_embed(data)
             
+            # 触发 市场广度
             if not is_holiday and current_str == BREADTH_SCHEDULE_TIME:
                 run_breadth_task()
             
             last_run_time_str = current_str
+        
         time.sleep(30)
