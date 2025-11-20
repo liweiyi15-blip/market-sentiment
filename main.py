@@ -18,13 +18,12 @@ WEBHOOK_URL = os.getenv("WEBHOOK_URL", "https://discord.com/api/webhooks/1440732
 NEXT_MEETING_DATE = "2025-12-10"
 
 # 🔥 每日定点发送时间表 (美东时间 HH:MM)
-# 仅覆盖盘前和盘中，移除盘后和夜盘时间
 SCHEDULE_TIMES = ["08:31", "09:31", "11:31", "13:31", "15:31"]
 
 PREV_CUT_PROB = None
 
 # ==========================================
-# 🛠️ 时间检查：定点触发 (排除周末/节假日)
+# 🛠️ 时间检查：定点触发 (修复了 markets 参数错误)
 # ==========================================
 def should_run_now():
     """
@@ -37,13 +36,12 @@ def should_run_now():
     
     # 1. 排除周末
     if now_et.weekday() >= 5:
-        # 仅在整点打印一次日志，避免刷屏
         if now_et.minute == 0 and now_et.second < 5:
             print(f"😴 周末休市 (ET: {now_et.strftime('%a %H:%M')})")
         return False
 
-    # 2. 排除节假日
-    us_holidays = holidays.US(years=now_et.year, markets=['NYSE'])
+    # 2. 排除节假日 (已修复 TypeError)
+    us_holidays = holidays.US(years=now_et.year) 
     if now_et.date() in us_holidays:
         if now_et.minute == 0 and now_et.second < 5:
             print(f"😴 今日是假期 ({us_holidays.get(now_et.date())})")
@@ -92,6 +90,7 @@ def get_data_via_selenium():
         current_rate = "Unknown"
         
         try:
+            # 智能寻找表格
             tables = driver.find_elements(By.TAG_NAME, "table")
             target_table = None
             for tbl in tables:
@@ -150,6 +149,15 @@ def send_embed(data):
     # --- 逻辑判定 ---
     cut_prob_value = 0.0
     try:
+        curr_val = float(data['current'].split('-')[0])
+        items = [top1]
+        if top2: items.append(top2)
+        for item in items:
+            target_val = float(item['target'].split('-')[0])
+            if target_val < curr_val:
+                cut_prob_value = item['prob']
+                break
+                
         val1 = float(top1['target'].split('-')[0])
         val2 = float(top2['target'].split('-')[0]) if top2 else 0
         
@@ -162,28 +170,27 @@ def send_embed(data):
                 label2_suffix = "(维持)"
                 consensus_text = "降息 (Cut)"
                 icon = "📉"
-                color = 0x57F287 # 绿
-                cut_prob_value = top1['prob']
+                color = 0x57F287
+                
             else: # Top1 维持
                 label1_suffix = "(维持)"
                 label2_suffix = "(降息)"
                 consensus_text = "维持利率 (Hold)"
                 icon = "⏸️"
-                color = 0x3498DB # 蓝
-                cut_prob_value = top2['prob']
+                color = 0x3498DB
         else:
-            # 简单容错
             label1_suffix = "(共识)"
             consensus_text = "趋势不明"
             icon = "⚖️"
             color = 0x3498DB
-            cut_prob_value = top1['prob']
+            
     except:
         label1_suffix = ""
         label2_suffix = ""
         consensus_text = "未知"
         icon = "❓"
         color = 0x99AAB5
+        cut_prob_value = 0.0
 
     # --- 趋势计算 ---
     delta = 0.0
@@ -239,30 +246,25 @@ if __name__ == "__main__":
     print("🚀 定点闹钟版 (纯盘前/盘中) 已启动...")
     print(f"📅 计划时间点 (ET): {SCHEDULE_TIMES}")
     
-    # 记录上一次运行的时间字符串，防止同一分钟内重复发送
     last_run_time_str = ""
 
     while True:
-        # 1. 检查是否应该运行
         if should_run_now():
             tz = pytz.timezone('US/Eastern')
             current_str = datetime.now(tz).strftime("%H:%M")
             
-            # 确保这一分钟只运行一次
             if current_str != last_run_time_str:
                 print(f"⚡ 开始执行任务: {current_str} ET")
                 
                 data = get_data_via_selenium()
                 if data:
                     send_embed(data)
-                    last_run_time_str = current_str # 标记为已运行
+                    last_run_time_str = current_str 
                     print("✅ 任务完成，等待下一个时间点...")
                 else:
                     print("⚠️ 抓取失败，本次跳过")
             
-            # 运行完（或跳过）后，休眠 40 秒防止死循环占用 CPU
             time.sleep(40)
         
         else:
-            # 如果不是目标时间，每 30 秒检查一次
             time.sleep(30)
