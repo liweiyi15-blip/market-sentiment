@@ -1,4 +1,4 @@
-selenium
 requests
+selenium
 pytz
 holidays
