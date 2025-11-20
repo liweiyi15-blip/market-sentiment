@@ -20,17 +20,22 @@ from selenium.webdriver.common.by import By
 # ⚙️ 全局配置区
 # ==========================================
 
-WEBHOOK_URL = os.getenv("WEBHOOK_URL") # 记得设置环境变量
+WEBHOOK_URL = os.getenv("WEBHOOK_URL") # 请确保环境变量存在，或直接填入 webhook 链接
 NEXT_MEETING_DATE = "2025-12-10"
 
 # ⏰ 时间表 (美东时间 ET)
 FED_SCHEDULE_TIMES = ["08:31", "09:31", "11:31", "13:31", "15:31"]
 BREADTH_SCHEDULE_TIME = "16:30"
 
-# 🎭 机器人配置
-FED_BOT_NAME = "🏛️ 美联储利率观察"
-FED_BOT_AVATAR = "https://cdn-icons-png.flaticon.com/512/2156/2156009.png" 
+# ------------------------------------------
+# 🏛️ FedWatch 配置 (右图样式 + 新头像)
+# ------------------------------------------
+FED_BOT_NAME = "CME FedWatch Bot"
+FED_BOT_AVATAR = "https://i.imgur.com/E9KAPsn.png"
 
+# ------------------------------------------
+# 📊 市场广度 配置 (新样式)
+# ------------------------------------------
 BREADTH_BOT_NAME = "标普500 广度日报" 
 BREADTH_BOT_AVATAR = "https://i.imgur.com/Segc5PF.png" 
 
@@ -46,17 +51,35 @@ def is_market_holiday(now_et):
     return False, None
 
 def get_bar(p):
-    return "█" * int(p//10) + "░" * (10 - int(p//10))
+    # 长进度条样式 (15格)
+    length = 15
+    filled = int(p / 100 * length)
+    return "█" * filled + "░" * (length - filled)
 
 def get_market_sentiment(p):
-    """
-    【保留设定】去掉 '市场' 二字
-    """
+    # 去掉“市场”二字，只保留形容词
     if p > 80: return "🔥🔥 **深度火热**"
     if p > 60: return "🔥 **火热**"      
     if p < 20: return "❄️❄️ **深度寒冷**"
     if p < 40: return "❄️ **寒冷**"      
     return "🍃 **稳定**"             
+
+def format_target_label(target_str):
+    """
+    推断 (维持)/(降息)/(加息) 标签
+    注：此处假设基准利率为 4.0+，实际请根据当前环境微调
+    """
+    CURRENT_RATE_BASE = 4.00 
+    try:
+        lower_bound = float(target_str.split('-')[0].strip())
+        if lower_bound < CURRENT_RATE_BASE:
+            return f"{target_str} (降息)"
+        elif lower_bound == CURRENT_RATE_BASE:
+            return f"{target_str} (维持)"
+        else:
+            return f"{target_str} (加息)"
+    except:
+        return target_str
 
 # ==========================================
 # 🟢 模块 1: 降息概率 (Selenium)
@@ -69,7 +92,7 @@ def get_fed_data():
     options.add_argument("--no-sandbox")
     options.add_argument("--disable-dev-shm-usage")
     options.add_argument("--disable-gpu")
-    options.add_argument("user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64)")
+    options.add_argument("user-agent=Mozilla/5.0")
 
     driver = None
     try:
@@ -103,6 +126,7 @@ def get_fed_data():
                     except: continue
         
         if not data_points: return None
+        # 按概率排序，取前两个
         data_points.sort(key=lambda x: x['prob'], reverse=True)
         return {"current": "Unknown", "data": data_points[:2]}
 
@@ -115,36 +139,67 @@ def get_fed_data():
             except: pass
 
 def send_fed_embed(data):
+    """
+    发送右图风格的 FedWatch 报告
+    """
     global PREV_CUT_PROB
     if not data or not data['data']: return
     
+    # 获取前两名概率
     top1 = data['data'][0]
-    cut_prob_value = top1['prob'] 
+    top2 = data['data'][1] if len(data['data']) > 1 else None
     
+    current_prob = top1['prob']
     delta = 0.0
-    if PREV_CUT_PROB is not None: delta = cut_prob_value - PREV_CUT_PROB
-    PREV_CUT_PROB = cut_prob_value
+    if PREV_CUT_PROB is not None: delta = current_prob - PREV_CUT_PROB
+    PREV_CUT_PROB = current_prob
     
-    trend_str = "稳定"
-    if delta > 0.1: trend_str = f"概率上升 +{delta:.1f}% 🔥"
-    elif delta < -0.1: trend_str = f"概率下降 {delta:.1f}% ❄️"
+    # 1. 趋势变动
+    trend_text = "稳定"
+    trend_icon = "⚖️"
+    if delta > 1.0: 
+        trend_text = f"概率上升 +{delta:.1f}%"
+        trend_icon = "🔥"
+    elif delta < -1.0: 
+        trend_text = f"概率下降 {delta:.1f}%"
+        trend_icon = "❄️"
+    
+    # 2. 华尔街共识
+    consensus_text = format_target_label(top1['target'])
+    if "维持" in consensus_text:
+        consensus_short = "⏸️ 维持利率 (Hold)"
+    elif "降息" in consensus_text:
+        consensus_short = "📉 降息 (Cut)"
+    else:
+        consensus_short = "📈 加息 (Hike)"
 
-    desc = [
-        f"**🗓️ 下次会议:** `{NEXT_MEETING_DATE}`",
-        "",
-        f"**目标: {top1['target']}**", 
-        f"{get_bar(top1['prob'])} **{top1['prob']}%**",
-        ""
-    ]
+    # 3. 构建 Description
+    desc_lines = [f"**🗓️ 下次会议:** `{NEXT_MEETING_DATE}`\n"]
     
+    # Line 1
+    label1 = format_target_label(top1['target'])
+    desc_lines.append(f"**目标: {label1}**")
+    desc_lines.append(f"`{get_bar(top1['prob'])}` **{top1['prob']}%**\n")
+    
+    # Line 2 (如果有)
+    if top2:
+        label2 = format_target_label(top2['target'])
+        desc_lines.append(f"**目标: {label2}**")
+        desc_lines.append(f"`{get_bar(top2['prob'])}` **{top2['prob']}%**")
+    
+    desc_lines.append("\n------------------------")
+
     payload = {
         "username": FED_BOT_NAME,
         "avatar_url": FED_BOT_AVATAR,
         "embeds": [{
             "title": "🏛️ CME FedWatch™ (降息预期)",
-            "description": "\n".join(desc),
+            "description": "\n".join(desc_lines),
             "color": 0x3498DB,
-            "fields": [{"name": "📊 变动", "value": trend_str, "inline": True}],
+            "fields": [
+                {"name": f"{trend_icon} 趋势变动", "value": trend_text, "inline": True},
+                {"name": "💡 华尔街共识", "value": consensus_short, "inline": True}
+            ],
             "footer": {"text": f"Updated at {datetime.now().strftime('%H:%M')} ET"}
         }]
     }
@@ -152,10 +207,9 @@ def send_fed_embed(data):
     except Exception as e: print(f"❌ 推送失败: {e}")
 
 # ==========================================
-# 🔵 模块 2: 市场广度 (统计样本移至Footer)
+# 🔵 模块 2: 市场广度 (Footer 含样本数)
 # ==========================================
 def generate_breadth_chart(breadth_20_series, breadth_50_series):
-    """生成市场广度折线图"""
     plt.style.use('dark_background')
     fig, ax = plt.subplots(figsize=(10, 5))
     
@@ -189,39 +243,37 @@ def generate_breadth_chart(breadth_20_series, breadth_50_series):
 
 def run_breadth_task():
     print("📊 启动市场广度统计...")
-    
     try:
-        # 1. 获取名单
+        # 获取成分股
         try:
             url = 'https://en.wikipedia.org/wiki/List_of_S%26P_500_companies'
             headers = {'User-Agent': 'Mozilla/5.0'}
             resp = requests.get(url, headers=headers, timeout=10)
             tables = pd.read_html(io.StringIO(resp.text))
             df_tickers = next((df for df in tables if 'Symbol' in df.columns), None)
-            
             if df_tickers is None: raise ValueError("未找到表格")
             tickers = [t.replace('.', '-') for t in df_tickers['Symbol'].tolist()] 
         except:
-            print("⚠️ 无法获取完整列表，使用默认头部科技股替代")
+            print("⚠️ Wikipedia 获取失败，使用备用列表")
             tickers = ['AAPL', 'MSFT', 'NVDA', 'AMZN', 'GOOGL', 'META', 'TSLA', 'BRK-B', 'LLY', 'AVGO']
 
-        # 2. 下载数据
+        # 下载数据
         warnings.simplefilter(action='ignore', category=FutureWarning)
         data = yf.download(tickers, period="1y", progress=False) 
         if 'Close' in data.columns: closes = data['Close']
         else: closes = data
 
-        # 3. 计算指标
+        # 计算均线
         sma20_df = closes.rolling(window=20).mean()
         sma50_df = closes.rolling(window=50).mean()
         
         daily_breadth_20 = ((closes > sma20_df).sum(axis=1) / closes.notna().sum(axis=1)) * 100
         daily_breadth_50 = ((closes > sma50_df).sum(axis=1) / closes.notna().sum(axis=1)) * 100
         
-        # 4. 生成图表
+        # 生成图表
         chart_buffer = generate_breadth_chart(daily_breadth_20.tail(252), daily_breadth_50.tail(252))
         
-        # 5. 准备文案
+        # 最新值
         current_p20 = daily_breadth_20.iloc[-1]
         current_p50 = daily_breadth_50.iloc[-1]
         
@@ -233,7 +285,6 @@ def run_breadth_task():
             "avatar_url": BREADTH_BOT_AVATAR,
             "embeds": [{
                 "title": "S&P 500 市场广度",
-                # 【修改】移除了这里的“统计样本”行
                 "description": f"**日期:** `{datetime.now().strftime('%Y-%m-%d')}`\n\n"
                                f"**股价 > 20日均线:** **{current_p20:.1f}%**\n"
                                f"{sentiment_20}\n\n"
@@ -242,8 +293,8 @@ def run_breadth_task():
                 "color": 0xF1C40F,
                 "image": {"url": "attachment://chart.png"},
                 "footer": {
-                    # 【修改】统计样本数加在这里，说明的下面
-                    "text": f"💡 标普500大于20日、50日均的数量\n💡 >80% 警惕回调，<20% 孕育反弹。\n（统计样本: {len(tickers)}只成分股）"
+                    # 统计样本数放在最后
+                    "text": f"💡 标普500大于20日、50日均的数量\n💡 >80% 警惕回调，<20% 孕育反弹。\n（统计样本: {len(tickers)}成分股）"
                 }
             }]
         }
@@ -261,10 +312,20 @@ def run_breadth_task():
 if __name__ == "__main__":
     print("🚀 监控服务已启动")
     
-    # 测试模式
-    print("🧪 测试运行中...")
+    # --- 启动时自动测试 ---
+    print("🧪 [测试] 正在抓取并发送 FedWatch...")
+    fed_data = get_fed_data()
+    if fed_data: 
+        send_fed_embed(fed_data)
+        print("✅ FedWatch 测试发送成功")
+    else:
+        print("⚠️ FedWatch 数据获取失败")
+
+    print("🧪 [测试] 正在计算并发送 市场广度...")
     run_breadth_task()
-    print("✅ 测试结束，挂机中...")
+    print("✅ 市场广度 测试发送成功")
+    print("----------------------------------")
+    print("✅ 所有测试结束，开始进入定时监听模式...")
 
     last_run_time_str = ""
     while True:
@@ -276,10 +337,12 @@ if __name__ == "__main__":
         if current_str != last_run_time_str:
             print(f"⏰ {current_str} ET")
             
+            # FedWatch 定时触发
             if not is_holiday and current_str in FED_SCHEDULE_TIMES:
                 data = get_fed_data()
                 if data: send_fed_embed(data)
             
+            # 市场广度 定时触发
             if not is_holiday and current_str == BREADTH_SCHEDULE_TIME:
                 run_breadth_task()
             
