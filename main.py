@@ -13,20 +13,20 @@ from selenium.webdriver.common.by import By
 # ⚙️ 全局配置区
 # ==========================================
 
-# 🔑 密钥与 URL (从环境变量获取)
+# 🔑 密钥与 URL (请确保在 Railway Variables 中设置)
 WEBHOOK_URL = os.getenv("WEBHOOK_URL") 
-FMP_API_KEY = os.getenv("FMP_API_KEY") # 必须在 Railway 变量中设置
+FMP_API_KEY = os.getenv("FMP_API_KEY") 
 
-# 📅 下次会议时间
+# 📅 下次美联储会议时间 (手动更新)
 NEXT_MEETING_DATE = "2025-12-10"
 
 # ⏰ 时间表 (美东时间 ET)
 # 1. 降息预测: 盘前/盘中整点
 FED_SCHEDULE_TIMES = ["08:31", "09:31", "11:31", "13:31", "15:31"]
-# 2. 市场广度: 收盘后 (建议 16:30 确保数据已结算)
+# 2. 市场广度: 收盘后 (确保数据已结算)
 BREADTH_SCHEDULE_TIME = "16:30"
 
-# 🤖 机器人角色配置 (双面人)
+# 🎭 机器人角色配置 (双面人)
 # 角色 A: 降息预测
 FED_BOT_NAME = "🏛️ 美联储利率观察"
 FED_BOT_AVATAR = "https://cdn-icons-png.flaticon.com/512/2156/2156009.png" 
@@ -64,7 +64,6 @@ def get_bar(p):
 def get_fed_data():
     print(f"⚡ 启动 Chromium 抓取 FedWatch...")
     options = Options()
-    # Railway/Docker 常用路径配置
     options.binary_location = "/usr/bin/chromium"
     options.add_argument("--headless=new") 
     options.add_argument("--no-sandbox")
@@ -102,7 +101,6 @@ def get_fed_data():
                     txt0 = cols[0].text.strip()
                     txt1 = cols[1].text.strip()
                     try:
-                        # 解析概率和目标利率
                         if "%" in txt0:
                             prob = float(txt0.replace("%", ""))
                             target = txt1
@@ -132,11 +130,8 @@ def send_fed_embed(data):
     top1 = data['data'][0]
     top2 = data['data'][1] if len(data['data']) > 1 else None
     
-    # 简单逻辑：假设 Target 越小越可能是降息
-    # 这里简化处理，只取 Top1 的概率作为主要指标
     cut_prob_value = top1['prob'] 
 
-    # 趋势计算
     delta = 0.0
     if PREV_CUT_PROB is not None:
         delta = cut_prob_value - PREV_CUT_PROB
@@ -158,12 +153,12 @@ def send_fed_embed(data):
         desc.append(f"{get_bar(top2['prob'])} **{top2['prob']}%**")
 
     payload = {
-        "username": FED_BOT_NAME,     # <--- 角色 A 名称
-        "avatar_url": FED_BOT_AVATAR, # <--- 角色 A 头像
+        "username": FED_BOT_NAME,     # <--- 角色 A
+        "avatar_url": FED_BOT_AVATAR, # <--- 角色 A
         "embeds": [{
             "title": "🏛️ CME FedWatch™ (降息预期)",
             "description": "\n".join(desc),
-            "color": 0x3498DB, # 蓝色
+            "color": 0x3498DB,
             "fields": [
                 {"name": "📊 趋势变动", "value": trend_str, "inline": True},
                 {"name": "💡 市场共识", "value": f"押注 {top1['target']}", "inline": True}
@@ -191,7 +186,6 @@ def run_breadth_task():
         tickers = [item['symbol'] for item in requests.get(sp500_url).json()]
         
         # 2. 批量获取报价 (含 priceAvg50, priceAvg200)
-        # 每次请求 100 个以加快速度
         batch_size = 100
         above_50, above_200, total = 0, 0, 0
         
@@ -217,8 +211,8 @@ def run_breadth_task():
         
         # 构建 Embed
         payload = {
-            "username": BREADTH_BOT_NAME,     # <--- 角色 B 名称
-            "avatar_url": BREADTH_BOT_AVATAR, # <--- 角色 B 头像
+            "username": BREADTH_BOT_NAME,     # <--- 角色 B
+            "avatar_url": BREADTH_BOT_AVATAR, # <--- 角色 B
             "embeds": [{
                 "title": "📊 S&P 500 市场广度日报",
                 "description": f"**日期:** `{datetime.now().strftime('%Y-%m-%d')}`\n"
@@ -244,6 +238,13 @@ def run_breadth_task():
 # ==========================================
 if __name__ == "__main__":
     print("🚀 双功能机器人已启动 (FedWatch + MarketBreadth)")
+    
+    # 👇👇👇 启动测试区：无论几点，启动时先测一次广度 👇👇👇
+    print("🧪 正在进行启动测试：发送一条市场广度报告...")
+    run_breadth_task()
+    print("✅ 测试完成，进入定时监听模式...")
+    # 👆👆👆 --------------------------------------- 👆👆👆
+
     print(f"📅 Fed 时间点: {FED_SCHEDULE_TIMES}")
     print(f"📅 广度 时间点: {BREADTH_SCHEDULE_TIME}")
     
@@ -261,23 +262,17 @@ if __name__ == "__main__":
         if current_str != last_run_time_str:
             print(f"⏰ 时间检查: {current_str} ET (Holiday: {is_holiday})")
             
-            # --- 任务 1: 降息预测 (仅在交易日运行) ---
+            # 任务 1: 降息预测 (仅交易日)
             if not is_holiday and current_str in FED_SCHEDULE_TIMES:
                 print(f"⚡ 触发 Fed 任务...")
                 data = get_fed_data()
                 if data: send_fed_embed(data)
             
-            # --- 任务 2: 市场广度 (仅在交易日运行) ---
-            # 如果需要在收盘后运行，确保时间在 SCHEDULE 设置正确
+            # 任务 2: 市场广度 (仅交易日)
             if not is_holiday and current_str == BREADTH_SCHEDULE_TIME:
                 print(f"⚡ 触发 广度 任务...")
                 run_breadth_task()
             
-            # --- (可选) 周末心跳包，防止认为挂了 ---
-            # if is_holiday and current_str == "12:00":
-            #    print("😴 周末休眠中...")
-
             last_run_time_str = current_str
         
-        # 避免 CPU 占用过高，每次检查间隔 30 秒
         time.sleep(30)
