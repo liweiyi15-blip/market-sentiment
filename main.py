@@ -8,6 +8,7 @@ import yfinance as yf
 import io
 import json
 import warnings
+import re
 import matplotlib.pyplot as plt
 import matplotlib.dates as mdates
 from datetime import datetime, timedelta
@@ -31,7 +32,6 @@ BREADTH_SCHEDULE_TIME = "16:30"
 # 🏛️ FedWatch 配置
 # ------------------------------------------
 FED_BOT_NAME = "CME FedWatch Bot"
-# 使用 imgur 直链 (.png) 确保 Discord 能正确加载预览
 FED_BOT_AVATAR = "https://i.imgur.com/E9KAPsn.png"
 
 # ------------------------------------------
@@ -52,45 +52,56 @@ def is_market_holiday(now_et):
     return False, None
 
 def get_bar(p):
-    # 长进度条样式
     length = 15
     filled = int(p / 100 * length)
     return "█" * filled + "░" * (length - filled)
 
-def get_market_sentiment(p):
-    if p > 80: return "🔥🔥 **深度火热**"
-    if p > 60: return "🔥 **火热**"      
-    if p < 20: return "❄️❄️ **深度寒冷**"
-    if p < 40: return "❄️ **寒冷**"      
-    return "🍃 **稳定**"             
-
-def format_target_label(target_str):
+def format_target_label(target_str, current_rate_base):
     """
-    逻辑修正：
-    当前利率为 3.75 - 4.00。
-    因此 Lower Bound (下限) 为 3.75。
+    全自动判断：传入检测到的基准利率(Lower Bound)
     """
-    # 【关键修正】将基准线改为 3.75
-    CURRENT_RATE_LOWER_BOUND = 3.75 
-    
     try:
-        # 获取目标区间的下限 (例如 "3.75 - 4.00" -> 3.75)
+        # 获取目标区间的下限
         lower_bound = float(target_str.split('-')[0].strip())
         
-        if lower_bound < CURRENT_RATE_LOWER_BOUND:
+        # 允许0.05的误差范围 (应对网页显示精度差异)
+        if abs(lower_bound - current_rate_base) <= 0.05:
+            return f"{target_str} (维持)"
+        elif lower_bound < current_rate_base:
             return f"{target_str} (降息)"
-        elif lower_bound == CURRENT_RATE_LOWER_BOUND:
-            return f"{target_str} (维持)" # 3.75 == 3.75 -> 维持
         else:
             return f"{target_str} (加息)"
     except:
         return target_str
 
 # ==========================================
-# 🟢 模块 1: 降息概率 (Selenium)
+# 🟢 模块 1: 降息概率 (双保险全自动模式)
 # ==========================================
+
+def fetch_backup_rate_from_tradingeconomics(driver):
+    """
+    【Plan B】当主站抓不到利率时，去 TradingEconomics 抓
+    """
+    print("🔄 主站未找到利率，启动 Plan B: 前往 TradingEconomics...")
+    try:
+        driver.get("https://tradingeconomics.com/united-states/interest-rate")
+        time.sleep(3)
+        
+        # TradingEconomics 通常显示的是利率上限 (Upper Bound)，例如 4.00
+        # ID通常是 'last_last'
+        rate_text = driver.find_element(By.ID, "last_last").text
+        upper_bound = float(rate_text)
+        
+        # 美联储区间通常宽度为 0.25，所以 下限 = 上限 - 0.25
+        lower_bound = upper_bound - 0.25
+        print(f"✅ [Plan B] 成功抓取利率: {upper_bound}% (推算下限: {lower_bound}%)")
+        return lower_bound
+    except Exception as e:
+        print(f"❌ [Plan B] 也失败了: {e}")
+        return None
+
 def get_fed_data():
-    print(f"⚡ 启动 Chromium 抓取 FedWatch...")
+    print(f"⚡ 启动 Chromium 抓取...")
     options = Options()
     options.binary_location = "/usr/bin/chromium" 
     options.add_argument("--headless=new") 
@@ -100,14 +111,29 @@ def get_fed_data():
     options.add_argument("user-agent=Mozilla/5.0")
 
     driver = None
+    detected_base_rate = None
+    
     try:
         service = Service("/usr/bin/chromedriver") 
         driver = webdriver.Chrome(service=service, options=options)
-        driver.set_page_load_timeout(45)
+        driver.set_page_load_timeout(60)
         
+        # 1. 先去主站 Investing.com 抓概率 + 尝试抓利率
         driver.get("https://www.investing.com/central-banks/fed-rate-monitor")
-        time.sleep(8)
+        time.sleep(5) 
         
+        # --- 尝试从主站抓取利率 ---
+        try:
+            page_text = driver.find_element(By.TAG_NAME, "body").text
+            # 寻找 "Current Interest Rate: 3.75% - 4.00%"
+            match = re.search(r"Current.*?Rate.*?(\d+\.?\d*)", page_text, re.IGNORECASE)
+            if match:
+                detected_base_rate = float(match.group(1))
+                print(f"🔍 [主站] 自动检测到当前利率下限: {detected_base_rate}%")
+        except:
+            pass
+
+        # --- 抓取概率表格 (必须在主站完成) ---
         data_points = []
         tables = driver.find_elements(By.TAG_NAME, "table")
         target_table = None
@@ -130,9 +156,23 @@ def get_fed_data():
                         data_points.append({"prob": prob, "target": target})
                     except: continue
         
+        # --- 如果主站没找到利率，启动 Plan B ---
+        if detected_base_rate is None:
+            # 注意：这会跳转页面，但因为上面已经抓完表格数据存在 data_points 里了，所以跳转是安全的
+            backup_rate = fetch_backup_rate_from_tradingeconomics(driver)
+            if backup_rate:
+                detected_base_rate = backup_rate
+            else:
+                detected_base_rate = 3.75 # 最终兜底
+                print(f"⚠️ 双重抓取均失败，使用默认兜底: {detected_base_rate}%")
+
         if not data_points: return None
         data_points.sort(key=lambda x: x['prob'], reverse=True)
-        return {"current": "Unknown", "data": data_points[:2]}
+        
+        return {
+            "current_base_rate": detected_base_rate, 
+            "data": data_points[:2]
+        }
 
     except Exception as e:
         print(f"❌ Selenium 抓取错误: {e}")
@@ -148,13 +188,13 @@ def send_fed_embed(data):
     
     top1 = data['data'][0]
     top2 = data['data'][1] if len(data['data']) > 1 else None
+    base_rate = data.get("current_base_rate", 3.75)
     
     current_prob = top1['prob']
     delta = 0.0
     if PREV_CUT_PROB is not None: delta = current_prob - PREV_CUT_PROB
     PREV_CUT_PROB = current_prob
     
-    # 1. 趋势变动
     trend_text = "稳定"
     trend_icon = "⚖️"
     if delta > 1.0: 
@@ -164,9 +204,8 @@ def send_fed_embed(data):
         trend_text = f"概率下降 {abs(delta):.1f}%"
         trend_icon = "❄️"
     
-    # 2. 华尔街共识 (逻辑修正)
-    # 重新调用 label 函数判断是 维持 还是 降息
-    label1_raw = format_target_label(top1['target'])
+    # 使用全自动获取的 base_rate 生成标签
+    label1_raw = format_target_label(top1['target'], base_rate)
     
     if "(维持)" in label1_raw:
         consensus_short = "⏸️ 维持利率 (Hold)"
@@ -175,14 +214,12 @@ def send_fed_embed(data):
     else:
         consensus_short = "📈 加息 (Hike)"
 
-    # 3. 构建内容
     desc_lines = [f"**🗓️ 下次会议:** `{NEXT_MEETING_DATE}`\n"]
-    
     desc_lines.append(f"**目标: {label1_raw}**")
     desc_lines.append(f"`{get_bar(top1['prob'])}` **{top1['prob']}%**\n")
     
     if top2:
-        label2_raw = format_target_label(top2['target'])
+        label2_raw = format_target_label(top2['target'], base_rate)
         desc_lines.append(f"**目标: {label2_raw}**")
         desc_lines.append(f"`{get_bar(top2['prob'])}` **{top2['prob']}%**")
     
@@ -206,7 +243,7 @@ def send_fed_embed(data):
     except Exception as e: print(f"❌ 推送失败: {e}")
 
 # ==========================================
-# 🔵 模块 2: 市场广度 (已修复文案)
+# 🔵 模块 2: 市场广度
 # ==========================================
 def generate_breadth_chart(breadth_20_series, breadth_50_series):
     plt.style.use('dark_background')
@@ -214,15 +251,12 @@ def generate_breadth_chart(breadth_20_series, breadth_50_series):
     
     ax.plot(breadth_20_series.index, breadth_20_series.values, 
             color='#f1c40f', linewidth=2, label='Stocks > 20 Day SMA %')
-    
     ax.plot(breadth_50_series.index, breadth_50_series.values, 
             color='#e74c3c', linewidth=2, label='Stocks > 50 Day SMA %')
-    
     ax.fill_between(breadth_20_series.index, breadth_20_series.values, alpha=0.1, color='#f1c40f')
     
     ax.axhline(y=80, color='#ff5252', linestyle='--', linewidth=1, alpha=0.8) 
     ax.text(breadth_20_series.index[0], 81, 'Overbought (80%)', color='#ff5252', fontsize=8)
-    
     ax.axhline(y=20, color='#448aff', linestyle='--', linewidth=1, alpha=0.8) 
     ax.text(breadth_20_series.index[0], 21, 'Oversold (20%)', color='#448aff', fontsize=8)
     
@@ -240,6 +274,13 @@ def generate_breadth_chart(breadth_20_series, breadth_50_series):
     plt.close()
     return buf
 
+def get_market_sentiment(p):
+    if p > 80: return "🔥🔥 **深度火热**"
+    if p > 60: return "🔥 **火热**"      
+    if p < 20: return "❄️❄️ **深度寒冷**"
+    if p < 40: return "❄️ **寒冷**"      
+    return "🍃 **稳定**"    
+
 def run_breadth_task():
     print("📊 启动市场广度统计...")
     try:
@@ -252,7 +293,6 @@ def run_breadth_task():
             if df_tickers is None: raise ValueError("未找到表格")
             tickers = [t.replace('.', '-') for t in df_tickers['Symbol'].tolist()] 
         except:
-            print("⚠️ Wikipedia 获取失败，使用备用列表")
             tickers = ['AAPL', 'MSFT', 'NVDA', 'AMZN', 'GOOGL', 'META', 'TSLA', 'BRK-B', 'LLY', 'AVGO']
 
         warnings.simplefilter(action='ignore', category=FutureWarning)
@@ -267,7 +307,6 @@ def run_breadth_task():
         daily_breadth_50 = ((closes > sma50_df).sum(axis=1) / closes.notna().sum(axis=1)) * 100
         
         chart_buffer = generate_breadth_chart(daily_breadth_20.tail(252), daily_breadth_50.tail(252))
-        
         current_p20 = daily_breadth_20.iloc[-1]
         current_p50 = daily_breadth_50.iloc[-1]
         
@@ -287,7 +326,6 @@ def run_breadth_task():
                 "color": 0xF1C40F,
                 "image": {"url": "attachment://chart.png"},
                 "footer": {
-                    # 【修正】加上了 "只" 字
                     "text": f"💡 标普500大于20日、50日均的数量\n💡 >80% 警惕回调，<20% 孕育反弹。\n（统计样本: {len(tickers)}只成分股）"
                 }
             }]
@@ -301,12 +339,12 @@ def run_breadth_task():
         print(f"❌ 广度任务异常: {e}")
 
 # ==========================================
-# 🚀 主程序 (含启动自测)
+# 🚀 主程序
 # ==========================================
 if __name__ == "__main__":
     print("🚀 监控服务已启动")
     
-    print("🧪 [测试] 正在发送 FedWatch (检查头像 + 3.75维持逻辑)...")
+    print("🧪 [测试] 正在发送 FedWatch (含双重保险)...")
     fed_data = get_fed_data()
     if fed_data: 
         send_fed_embed(fed_data)
@@ -314,7 +352,7 @@ if __name__ == "__main__":
     else:
         print("⚠️ FedWatch 获取失败")
 
-    print("🧪 [测试] 正在发送 市场广度 (检查'只'字)...")
+    print("🧪 [测试] 正在发送 市场广度...")
     run_breadth_task()
     
     print("✅ 所有测试结束，进入定时监听模式...")
