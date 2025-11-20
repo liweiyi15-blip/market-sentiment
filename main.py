@@ -153,8 +153,8 @@ def send_fed_embed(data):
         desc.append(f"{get_bar(top2['prob'])} **{top2['prob']}%**")
 
     payload = {
-        "username": FED_BOT_NAME,     # <--- 角色 A
-        "avatar_url": FED_BOT_AVATAR, # <--- 角色 A
+        "username": FED_BOT_NAME,
+        "avatar_url": FED_BOT_AVATAR,
         "embeds": [{
             "title": "🏛️ CME FedWatch™ (降息预期)",
             "description": "\n".join(desc),
@@ -172,49 +172,86 @@ def send_fed_embed(data):
     except Exception as e: print(f"❌ 推送失败: {e}")
 
 # ==========================================
-# 🔵 模块 2: 市场广度 (FMP API)
+# 🔵 模块 2: 市场广度 (FMP API - 修复版)
 # ==========================================
 def run_breadth_task():
-    print("📊 启动市场广度统计 (FMP API)...")
+    print("📊 启动市场广度统计 (Starter兼容版)...")
+    
     if not FMP_API_KEY:
-        print("❌ 错误: 未设置 FMP_API_KEY")
+        print("❌ 错误: 未设置 FMP_API_KEY，请在 Railway 设置！")
         return
 
     try:
-        # 1. 获取成分股列表
-        sp500_url = f"https://financialmodelingprep.com/api/v3/sp500_constituent?apikey={FMP_API_KEY}"
-        tickers = [item['symbol'] for item in requests.get(sp500_url).json()]
+        # 🟢 核心修复: 使用 Stock Screener 代替旧接口
+        # 筛选美股 Top 505 市值股票，近似标普 500
+        screener_url = (
+            f"https://financialmodelingprep.com/api/v3/stock-screener"
+            f"?marketCapMoreThan=1000000000"  # 市值 > 10亿
+            f"&exchange=NYSE,NASDAQ"          # 只看纽交所和纳斯达克
+            f"&limit=505"                     # 取前 505 名
+            f"&apikey={FMP_API_KEY}"
+        )
         
-        # 2. 批量获取报价 (含 priceAvg50, priceAvg200)
+        response = requests.get(screener_url)
+        if response.status_code != 200:
+            print(f"❌ API 请求失败: {response.text}")
+            return
+
+        data = response.json()
+        
+        # 错误处理：检查是否返回了 Error Message
+        if isinstance(data, dict) and "Error Message" in data:
+            print(f"❌ FMP API 报错: {data['Error Message']}")
+            return
+            
+        if not isinstance(data, list):
+            print(f"❌ API 返回格式异常: {data}")
+            return
+
+        tickers = [item['symbol'] for item in data]
+        print(f"✅ 已获取 Top {len(tickers)} 股票列表，开始计算广度...")
+        
+        # 批量获取股价和均线
         batch_size = 100
         above_50, above_200, total = 0, 0, 0
         
         for i in range(0, len(tickers), batch_size):
             batch = ",".join(tickers[i:i+batch_size])
             url = f"https://financialmodelingprep.com/api/v3/quote/{batch}?apikey={FMP_API_KEY}"
-            data = requests.get(url).json()
             
-            for stock in data:
-                p = stock.get('price')
-                ma50 = stock.get('priceAvg50')
-                ma200 = stock.get('priceAvg200')
-                
-                if p and ma50 and ma200:
-                    total += 1
-                    if p > ma50: above_50 += 1
-                    if p > ma200: above_200 += 1
-        
-        if total == 0: return
+            # 增加超时设置，防止卡死
+            try:
+                q_res = requests.get(url, timeout=10)
+            except:
+                print(f"⚠️ 批次 {i} 请求超时，跳过")
+                continue
+
+            if q_res.status_code == 200:
+                q_data = q_res.json()
+                if isinstance(q_data, list):
+                    for stock in q_data:
+                        p = stock.get('price')
+                        ma50 = stock.get('priceAvg50')
+                        ma200 = stock.get('priceAvg200')
+                        
+                        if p and ma50 and ma200:
+                            total += 1
+                            if p > ma50: above_50 += 1
+                            if p > ma200: above_200 += 1
+
+        if total == 0:
+            print("⚠️ 未获取到有效股价数据，无法计算")
+            return
 
         p50 = (above_50 / total) * 100
         p200 = (above_200 / total) * 100
         
-        # 构建 Embed
+        # 发送 Webhook
         payload = {
-            "username": BREADTH_BOT_NAME,     # <--- 角色 B
-            "avatar_url": BREADTH_BOT_AVATAR, # <--- 角色 B
+            "username": BREADTH_BOT_NAME,
+            "avatar_url": BREADTH_BOT_AVATAR,
             "embeds": [{
-                "title": "📊 S&P 500 市场广度日报",
+                "title": "📊 S&P 500 (Top 500) 市场广度",
                 "description": f"**日期:** `{datetime.now().strftime('%Y-%m-%d')}`\n"
                                f"*(美股收盘统计)*\n\n"
                                f"🟢 **股价 > 50日均线:** **{p50:.1f}%**\n"
@@ -223,15 +260,15 @@ def run_breadth_task():
                                f"🔵 **股价 > 200日均线:** **{p200:.1f}%**\n"
                                f"{get_bar(p200)}\n"
                                f"*(长期牛熊分界)*",
-                "color": 0xF1C40F, # 金色
-                "footer": {"text": f"统计样本: {total} 只成分股 • Data via FMP"}
+                "color": 0xF1C40F,
+                "footer": {"text": f"统计样本: {total} 只大盘股 • Data via FMP"}
             }]
         }
         requests.post(WEBHOOK_URL, json=payload)
         print(f"✅ 广度报告已推送: >50MA={p50:.1f}%")
 
     except Exception as e:
-        print(f"❌ 广度统计失败: {e}")
+        print(f"❌ 广度任务异常: {e}")
 
 # ==========================================
 # 🚀 主程序循环
@@ -239,11 +276,11 @@ def run_breadth_task():
 if __name__ == "__main__":
     print("🚀 双功能机器人已启动 (FedWatch + MarketBreadth)")
     
-    # 👇👇👇 启动测试区：无论几点，启动时先测一次广度 👇👇👇
+    # 👇👇👇 启动测试区 👇👇👇
     print("🧪 正在进行启动测试：发送一条市场广度报告...")
     run_breadth_task()
     print("✅ 测试完成，进入定时监听模式...")
-    # 👆👆👆 --------------------------------------- 👆👆👆
+    # 👆👆👆 ---------------- 👆👆👆
 
     print(f"📅 Fed 时间点: {FED_SCHEDULE_TIMES}")
     print(f"📅 广度 时间点: {BREADTH_SCHEDULE_TIME}")
@@ -275,4 +312,5 @@ if __name__ == "__main__":
             
             last_run_time_str = current_str
         
+        # 30秒心跳检查
         time.sleep(30)
