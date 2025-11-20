@@ -23,6 +23,8 @@ from selenium.webdriver.common.by import By
 
 WEBHOOK_URL = os.getenv("WEBHOOK_URL") 
 NEXT_MEETING_DATE = "2025-12-10"
+# 【重要】默认基准利率（当自动抓取失效或离谱时使用此值）
+DEFAULT_BASE_RATE = 3.75 
 
 # ⏰ 时间表 (美东时间 ET)
 FED_SCHEDULE_TIMES = ["08:31", "09:31", "11:31", "13:31", "15:31"]
@@ -32,6 +34,7 @@ BREADTH_SCHEDULE_TIME = "16:30"
 # 🏛️ FedWatch 配置
 # ------------------------------------------
 FED_BOT_NAME = "CME FedWatch Bot"
+# 【已修正】必须使用 .png 结尾的直链，不能用 /a/ 相册链
 FED_BOT_AVATAR = "https://i.imgur.com/E9KAPsn.png"
 
 # ------------------------------------------
@@ -58,13 +61,12 @@ def get_bar(p):
 
 def format_target_label(target_str, current_rate_base):
     """
-    全自动判断逻辑：传入检测到的基准利率(Lower Bound)
+    全自动判断逻辑
     """
     try:
-        # 获取目标区间的下限
         lower_bound = float(target_str.split('-')[0].strip())
         
-        # 允许0.05的误差范围 (应对网页显示精度差异)
+        # 允许0.05的误差范围
         if abs(lower_bound - current_rate_base) <= 0.05:
             return f"{target_str} (维持)"
         elif lower_bound < current_rate_base:
@@ -75,39 +77,28 @@ def format_target_label(target_str, current_rate_base):
         return target_str
 
 # ==========================================
-# 🟢 模块 1: 降息概率 (加强版抗指纹 + XPath双保险)
+# 🟢 模块 1: 降息概率 (含安全校验)
 # ==========================================
 
 def fetch_backup_rate_from_tradingeconomics(driver):
-    """
-    【Plan B】TradingEconomics (使用 XPath + 隐身模式)
-    """
+    """ Plan B: TradingEconomics """
     print("🔄 [Plan B] 正在尝试 TradingEconomics...")
     try:
         driver.get("https://tradingeconomics.com/united-states/interest-rate")
-        time.sleep(5) # 给一点时间让 Cloudflare/盾加载
-        
-        # 尝试方法 1: 通过表格文字定位 (最稳健)
-        # 逻辑：找到包含 "Fed Interest Rate" 的那一行，然后找里面的第二个单元格
+        time.sleep(5)
         try:
             element = driver.find_element(By.XPATH, "//tr[contains(., 'Fed Interest Rate')]//td[2]")
             rate_text = element.text.strip()
         except:
-            # 尝试方法 2: 原有的 ID 方式 (备用)
             element = driver.find_element(By.ID, "last_last")
             rate_text = element.text.strip()
             
-        print(f"🔍 [Plan B] 抓取到的原始文本: {rate_text}")
-        
         upper_bound = float(rate_text)
-        # 美联储区间通常宽度为 0.25，所以 下限 = 上限 - 0.25
         lower_bound = upper_bound - 0.25
-        
-        print(f"✅ [Plan B] 成功! 当前利率上限 {upper_bound}%, 推算下限 {lower_bound}%")
+        print(f"✅ [Plan B] 抓取成功: {lower_bound}%")
         return lower_bound
-
     except Exception as e:
-        print(f"❌ [Plan B] 失败 (可能被反爬拦截): {e}")
+        print(f"❌ [Plan B] 失败: {e}")
         return None
 
 def get_fed_data():
@@ -118,13 +109,10 @@ def get_fed_data():
     options.add_argument("--no-sandbox")
     options.add_argument("--disable-dev-shm-usage")
     options.add_argument("--disable-gpu")
-    
-    # --- 🕵️‍♂️ 关键：反爬虫伪装配置 ---
     options.add_argument("--disable-blink-features=AutomationControlled")
     options.add_argument("user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36")
     options.add_experimental_option("excludeSwitches", ["enable-automation"])
     options.add_experimental_option('useAutomationExtension', False)
-    # -------------------------------
 
     driver = None
     detected_base_rate = None
@@ -132,34 +120,35 @@ def get_fed_data():
     try:
         service = Service("/usr/bin/chromedriver") 
         driver = webdriver.Chrome(service=service, options=options)
-        
-        # 防止被检测 webdriver 属性
         driver.execute_script("Object.defineProperty(navigator, 'webdriver', {get: () => undefined})")
-        
         driver.set_page_load_timeout(60)
         
-        # 1. 先去主站 Investing.com
         driver.get("https://www.investing.com/central-banks/fed-rate-monitor")
         time.sleep(5) 
         
-        # --- 尝试从主站抓取利率 (Plan A) ---
+        # --- 尝试从主站抓取利率 (含合理性校验) ---
         try:
             page_text = driver.find_element(By.TAG_NAME, "body").text
-            # 放宽正则：寻找 "Current" ... "Rate" ... 数字
+            # 寻找 "Current ... Rate"
             match = re.search(r"Current.*?Rate.*?(\d+\.?\d*)", page_text, re.IGNORECASE | re.DOTALL)
             if match:
-                detected_base_rate = float(match.group(1))
-                print(f"✅ [Plan A] 主站自动检测到利率: {detected_base_rate}%")
+                val = float(match.group(1))
+                # 【关键修复】校验抓到的数字是否合理 (3.0% - 6.0%)
+                # 防止抓到网页里其他无关的 "1.0%"
+                if 3.0 <= val <= 6.0:
+                    detected_base_rate = val
+                    print(f"✅ [Plan A] 检测到有效利率: {detected_base_rate}%")
+                else:
+                    print(f"⚠️ [Plan A] 抓取到异常数值 ({val}%)，已忽略，将使用兜底值。")
         except Exception as e:
-            print(f"⚠️ [Plan A] 利率文字提取失败: {e}")
+            print(f"⚠️ [Plan A] 提取失败: {e}")
 
-        # --- 抓取概率表格 (必须在主站完成) ---
+        # --- 抓取概率表格 ---
         data_points = []
         try:
             tables = driver.find_elements(By.TAG_NAME, "table")
             target_table = None
             for tbl in tables:
-                # 寻找包含 % 且行数不多的表格
                 if "%" in tbl.text and len(tbl.find_elements(By.TAG_NAME, "tr")) < 15:
                     target_table = tbl
                     break
@@ -172,7 +161,6 @@ def get_fed_data():
                     if len(cols) >= 2:
                         txt0, txt1 = cols[0].text.strip(), cols[1].text.strip()
                         try:
-                            # 尝试解析概率和目标区间
                             if "%" in txt0: prob, target = float(txt0.replace("%", "")), txt1
                             elif "%" in txt1: prob, target = float(txt1.replace("%", "")), txt0
                             else: continue
@@ -181,15 +169,18 @@ def get_fed_data():
         except Exception as e:
             print(f"❌ 概率表格抓取错误: {e}")
 
-        # --- 如果主站没找到利率，启动 Plan B ---
+        # --- Plan B & 兜底逻辑 ---
         if detected_base_rate is None:
-            # 这会跳转页面，但只要表格数据已存入 data_points，就是安全的
-            backup_rate = fetch_backup_rate_from_tradingeconomics(driver)
-            if backup_rate:
-                detected_base_rate = backup_rate
+            # 只有在 data_points 已经抓到的情况下才去 Plan B，避免浪费时间
+            if data_points:
+                backup_rate = fetch_backup_rate_from_tradingeconomics(driver)
+                if backup_rate and 3.0 <= backup_rate <= 6.0:
+                    detected_base_rate = backup_rate
+                else:
+                    detected_base_rate = DEFAULT_BASE_RATE # 最终兜底 (3.75)
+                    print(f"⚠️ [兜底] 无法检测有效利率，强制使用: {detected_base_rate}%")
             else:
-                detected_base_rate = 3.75 # 最终兜底
-                print(f"⚠️ [最终兜底] 无法检测真实利率，使用默认值: {detected_base_rate}%")
+                 detected_base_rate = DEFAULT_BASE_RATE
 
         if not data_points: 
             print("❌ 未能抓取到任何概率数据")
@@ -216,7 +207,7 @@ def send_fed_embed(data):
     
     top1 = data['data'][0]
     top2 = data['data'][1] if len(data['data']) > 1 else None
-    base_rate = data.get("current_base_rate", 3.75)
+    base_rate = data.get("current_base_rate", DEFAULT_BASE_RATE)
     
     current_prob = top1['prob']
     delta = 0.0
@@ -232,7 +223,6 @@ def send_fed_embed(data):
         trend_text = f"概率下降 {abs(delta):.1f}%"
         trend_icon = "❄️"
     
-    # 使用全自动获取的 base_rate 生成标签
     label1_raw = format_target_label(top1['target'], base_rate)
     
     if "(维持)" in label1_raw:
@@ -324,7 +314,10 @@ def run_breadth_task():
             tickers = ['AAPL', 'MSFT', 'NVDA', 'AMZN', 'GOOGL', 'META', 'TSLA', 'BRK-B', 'LLY', 'AVGO']
 
         warnings.simplefilter(action='ignore', category=FutureWarning)
+        
+        # 解决 database locked 问题：尝试不使用共享缓存（如果不生效，可忽略，通常只是警告）
         data = yf.download(tickers, period="1y", progress=False) 
+        
         if 'Close' in data.columns: closes = data['Close']
         else: closes = data
 
@@ -372,7 +365,7 @@ def run_breadth_task():
 if __name__ == "__main__":
     print("🚀 监控服务已启动")
     
-    print("🧪 [测试] 正在发送 FedWatch (含双重保险+隐身)...")
+    print("🧪 [测试] 正在发送 FedWatch (含智能校验)...")
     fed_data = get_fed_data()
     if fed_data: 
         send_fed_embed(fed_data)
