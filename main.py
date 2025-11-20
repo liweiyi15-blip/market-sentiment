@@ -5,6 +5,8 @@ import pytz
 import holidays
 import pandas as pd
 import yfinance as yf
+import io
+import warnings
 from datetime import datetime
 from selenium import webdriver
 from selenium.webdriver.chrome.service import Service
@@ -16,8 +18,6 @@ from selenium.webdriver.common.by import By
 # ==========================================
 
 WEBHOOK_URL = os.getenv("WEBHOOK_URL") 
-# 注意：本版本彻底移除了 FMP_API_KEY，因为改用免费的 Yahoo 源
-
 NEXT_MEETING_DATE = "2025-12-10"
 
 # ⏰ 时间表 (美东时间 ET)
@@ -43,10 +43,17 @@ def is_market_holiday(now_et):
     return False, None
 
 def get_bar(p):
+    """Fed机器人仍需使用进度条，保留此函数"""
     return "█" * int(p//10) + "░" * (10 - int(p//10))
 
+def get_market_status(p):
+    """根据百分比判断市场冷热"""
+    if p > 80: return "🔥 **市场火热**"
+    if p < 20: return "❄️ **市场冰冷**"
+    return "" # 中间状态不显示，保持简洁
+
 # ==========================================
-# 🟢 模块 1: 降息概率 (Selenium) - 保持不变
+# 🟢 模块 1: 降息概率 (Selenium)
 # ==========================================
 def get_fed_data():
     print(f"⚡ 启动 Chromium 抓取 FedWatch...")
@@ -62,10 +69,10 @@ def get_fed_data():
     try:
         service = Service("/usr/bin/chromedriver")
         driver = webdriver.Chrome(service=service, options=options)
-        driver.set_page_load_timeout(45) # 稍微增加超时
+        driver.set_page_load_timeout(45)
         
         driver.get("https://www.investing.com/central-banks/fed-rate-monitor")
-        time.sleep(8) # 等待页面加载
+        time.sleep(8)
         
         data_points = []
         
@@ -140,74 +147,68 @@ def send_fed_embed(data):
     except Exception as e: print(f"❌ 推送失败: {e}")
 
 # ==========================================
-# 🔵 模块 2: 市场广度 (Yahoo Finance 免费版)
+# 🔵 模块 2: 市场广度 (Yahoo Finance)
 # ==========================================
 def run_breadth_task():
-    print("📊 启动市场广度统计 (Yahoo Finance)...")
+    print("📊 启动市场广度统计...")
     
     try:
-        # 1. 获取标普500名单 (从维基百科抓取，最稳)
-        print("📥 正在获取成分股名单 (Wikipedia)...")
+        # 1. 获取标普500名单 (伪装浏览器抓取 Wikipedia)
+        print("📥 获取成分股名单...")
         try:
-            # Pandas 自动解析网页表格
-            table = pd.read_html('https://en.wikipedia.org/wiki/List_of_S%26P_500_companies')
-            df_tickers = table[0]
-            tickers = df_tickers['Symbol'].tolist()
-            # 修正符号: Yahoo使用 'BRK-B' 而不是 'BRK.B'
-            tickers = [t.replace('.', '-') for t in tickers]
+            url = 'https://en.wikipedia.org/wiki/List_of_S%26P_500_companies'
+            headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'}
+            
+            resp = requests.get(url, headers=headers, timeout=10)
+            resp.raise_for_status()
+            
+            table = pd.read_html(io.StringIO(resp.text))
+            tickers = table[0]['Symbol'].tolist()
+            tickers = [t.replace('.', '-') for t in tickers] # 修正 BRK.B -> BRK-B
+            print(f"✅ 成功获取 {len(tickers)} 只成分股")
+            
         except Exception as e:
-            print(f"❌ 维基百科抓取失败: {e}, 使用备用列表")
+            print(f"❌ 抓取列表失败: {e}, 使用备用列表")
             tickers = ['AAPL', 'MSFT', 'NVDA', 'AMZN', 'GOOGL', 'META', 'TSLA', 'BRK-B', 'LLY', 'AVGO']
 
-        print(f"✅ 准备下载 {len(tickers)} 只股票数据...")
-        
-        # 2. 批量下载数据 (Yahoo Finance)
-        # 下载过去 300 天的数据，足以计算 200日均线
+        # 2. 批量下载数据
+        warnings.simplefilter(action='ignore', category=FutureWarning)
+        print(f"📥 下载 {len(tickers)} 只股票数据...")
         data = yf.download(tickers, period="1y", progress=False)
         
-        # 只取收盘价
         if 'Close' in data.columns:
             closes = data['Close']
         else:
-            closes = data
-            
-        print("✅ 数据下载完成，正在计算均线...")
+            closes = data # 如果只有1只股票的情况
 
         # 3. 计算指标
-        # 获取最新价格 (最后一行)
         current_prices = closes.iloc[-1]
-        
-        # 计算均线 (利用 Pandas 强大的整表计算)
-        # axis=0 表示按列(每只股票)计算
         ma50 = closes.rolling(window=50).mean().iloc[-1]
         ma200 = closes.rolling(window=200).mean().iloc[-1]
         
-        # 统计
         above_50 = (current_prices > ma50).sum()
         above_200 = (current_prices > ma200).sum()
-        total_valid = closes.shape[1] # 列数即为股票数
+        total_valid = closes.shape[1]
         
-        if total_valid == 0:
-            print("⚠️ 有效数据为 0")
-            return
+        if total_valid == 0: return
 
         p50 = (above_50 / total_valid) * 100
         p200 = (above_200 / total_valid) * 100
         
-        # 4. 推送
+        # 4. 构建 Embed (应用你的样式要求)
+        status_50 = get_market_status(p50)
+        status_200 = get_market_status(p200)
+
         payload = {
             "username": BREADTH_BOT_NAME,
             "avatar_url": BREADTH_BOT_AVATAR,
             "embeds": [{
                 "title": "📊 S&P 500 市场广度",
-                "description": f"**日期:** `{datetime.now().strftime('%Y-%m-%d')}`\n"
-                               f"*(数据源: Yahoo Finance)*\n\n"
-                               f"🟢 **股价 > 50日均线:** **{p50:.1f}%**\n"
-                               f"{get_bar(p50)}\n"
-                               f"*(中期趋势判断)*\n\n"
-                               f"🔵 **股价 > 200日均线:** **{p200:.1f}%**\n"
-                               f"{get_bar(p200)}\n"
-                               f"*(长期牛熊分界)*",
+                "description": f"**日期:** `{datetime.now().strftime('%Y-%m-%d')}`\n\n"
+                               f"**股价 > 50日均线:** **{p50:.1f}%** {status_50}\n"
+                               f"*(中期趋势)*\n\n"
+                               f"**股价 > 200日均线:** **{p200:.1f}%** {status_200}\n"
+                               f"*(长期牛熊)*",
                 "color": 0xF1C40F,
                 "footer": {"text": f"统计样本: {total_valid} 只成分股"}
             }]
@@ -222,7 +223,7 @@ def run_breadth_task():
 # 🚀 主程序
 # ==========================================
 if __name__ == "__main__":
-    print("🚀 机器人启动 (Yahoo源终极版)")
+    print("🚀 机器人启动 (样式优化版)")
     
     print("🧪 启动测试：立即发送一次广度报告...")
     run_breadth_task()
@@ -246,4 +247,4 @@ if __name__ == "__main__":
                 run_breadth_task()
             
             last_run_time_str = current_str
-        time.sleep(30)
+        time
