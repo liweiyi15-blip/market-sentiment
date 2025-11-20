@@ -58,7 +58,7 @@ def get_bar(p):
 
 def format_target_label(target_str, current_rate_base):
     """
-    全自动判断：传入检测到的基准利率(Lower Bound)
+    全自动判断逻辑：传入检测到的基准利率(Lower Bound)
     """
     try:
         # 获取目标区间的下限
@@ -75,40 +75,56 @@ def format_target_label(target_str, current_rate_base):
         return target_str
 
 # ==========================================
-# 🟢 模块 1: 降息概率 (双保险全自动模式)
+# 🟢 模块 1: 降息概率 (加强版抗指纹 + XPath双保险)
 # ==========================================
 
 def fetch_backup_rate_from_tradingeconomics(driver):
     """
-    【Plan B】当主站抓不到利率时，去 TradingEconomics 抓
+    【Plan B】TradingEconomics (使用 XPath + 隐身模式)
     """
-    print("🔄 主站未找到利率，启动 Plan B: 前往 TradingEconomics...")
+    print("🔄 [Plan B] 正在尝试 TradingEconomics...")
     try:
         driver.get("https://tradingeconomics.com/united-states/interest-rate")
-        time.sleep(3)
+        time.sleep(5) # 给一点时间让 Cloudflare/盾加载
         
-        # TradingEconomics 通常显示的是利率上限 (Upper Bound)，例如 4.00
-        # ID通常是 'last_last'
-        rate_text = driver.find_element(By.ID, "last_last").text
+        # 尝试方法 1: 通过表格文字定位 (最稳健)
+        # 逻辑：找到包含 "Fed Interest Rate" 的那一行，然后找里面的第二个单元格
+        try:
+            element = driver.find_element(By.XPATH, "//tr[contains(., 'Fed Interest Rate')]//td[2]")
+            rate_text = element.text.strip()
+        except:
+            # 尝试方法 2: 原有的 ID 方式 (备用)
+            element = driver.find_element(By.ID, "last_last")
+            rate_text = element.text.strip()
+            
+        print(f"🔍 [Plan B] 抓取到的原始文本: {rate_text}")
+        
         upper_bound = float(rate_text)
-        
         # 美联储区间通常宽度为 0.25，所以 下限 = 上限 - 0.25
         lower_bound = upper_bound - 0.25
-        print(f"✅ [Plan B] 成功抓取利率: {upper_bound}% (推算下限: {lower_bound}%)")
+        
+        print(f"✅ [Plan B] 成功! 当前利率上限 {upper_bound}%, 推算下限 {lower_bound}%")
         return lower_bound
+
     except Exception as e:
-        print(f"❌ [Plan B] 也失败了: {e}")
+        print(f"❌ [Plan B] 失败 (可能被反爬拦截): {e}")
         return None
 
 def get_fed_data():
-    print(f"⚡ 启动 Chromium 抓取...")
+    print(f"⚡ 启动 Chromium (隐身模式)...")
     options = Options()
     options.binary_location = "/usr/bin/chromium" 
     options.add_argument("--headless=new") 
     options.add_argument("--no-sandbox")
     options.add_argument("--disable-dev-shm-usage")
     options.add_argument("--disable-gpu")
-    options.add_argument("user-agent=Mozilla/5.0")
+    
+    # --- 🕵️‍♂️ 关键：反爬虫伪装配置 ---
+    options.add_argument("--disable-blink-features=AutomationControlled")
+    options.add_argument("user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36")
+    options.add_experimental_option("excludeSwitches", ["enable-automation"])
+    options.add_experimental_option('useAutomationExtension', False)
+    # -------------------------------
 
     driver = None
     detected_base_rate = None
@@ -116,57 +132,69 @@ def get_fed_data():
     try:
         service = Service("/usr/bin/chromedriver") 
         driver = webdriver.Chrome(service=service, options=options)
+        
+        # 防止被检测 webdriver 属性
+        driver.execute_script("Object.defineProperty(navigator, 'webdriver', {get: () => undefined})")
+        
         driver.set_page_load_timeout(60)
         
-        # 1. 先去主站 Investing.com 抓概率 + 尝试抓利率
+        # 1. 先去主站 Investing.com
         driver.get("https://www.investing.com/central-banks/fed-rate-monitor")
         time.sleep(5) 
         
-        # --- 尝试从主站抓取利率 ---
+        # --- 尝试从主站抓取利率 (Plan A) ---
         try:
             page_text = driver.find_element(By.TAG_NAME, "body").text
-            # 寻找 "Current Interest Rate: 3.75% - 4.00%"
-            match = re.search(r"Current.*?Rate.*?(\d+\.?\d*)", page_text, re.IGNORECASE)
+            # 放宽正则：寻找 "Current" ... "Rate" ... 数字
+            match = re.search(r"Current.*?Rate.*?(\d+\.?\d*)", page_text, re.IGNORECASE | re.DOTALL)
             if match:
                 detected_base_rate = float(match.group(1))
-                print(f"🔍 [主站] 自动检测到当前利率下限: {detected_base_rate}%")
-        except:
-            pass
+                print(f"✅ [Plan A] 主站自动检测到利率: {detected_base_rate}%")
+        except Exception as e:
+            print(f"⚠️ [Plan A] 利率文字提取失败: {e}")
 
         # --- 抓取概率表格 (必须在主站完成) ---
         data_points = []
-        tables = driver.find_elements(By.TAG_NAME, "table")
-        target_table = None
-        for tbl in tables:
-            if "%" in tbl.text and len(tbl.find_elements(By.TAG_NAME, "tr")) < 15:
-                target_table = tbl
-                break
-        if not target_table and tables: target_table = tables[0]
+        try:
+            tables = driver.find_elements(By.TAG_NAME, "table")
+            target_table = None
+            for tbl in tables:
+                # 寻找包含 % 且行数不多的表格
+                if "%" in tbl.text and len(tbl.find_elements(By.TAG_NAME, "tr")) < 15:
+                    target_table = tbl
+                    break
+            if not target_table and tables: target_table = tables[0]
 
-        if target_table:
-            rows = target_table.find_elements(By.TAG_NAME, "tr")
-            for row in rows:
-                cols = row.find_elements(By.TAG_NAME, "td")
-                if len(cols) >= 2:
-                    txt0, txt1 = cols[0].text.strip(), cols[1].text.strip()
-                    try:
-                        if "%" in txt0: prob, target = float(txt0.replace("%", "")), txt1
-                        elif "%" in txt1: prob, target = float(txt1.replace("%", "")), txt0
-                        else: continue
-                        data_points.append({"prob": prob, "target": target})
-                    except: continue
-        
+            if target_table:
+                rows = target_table.find_elements(By.TAG_NAME, "tr")
+                for row in rows:
+                    cols = row.find_elements(By.TAG_NAME, "td")
+                    if len(cols) >= 2:
+                        txt0, txt1 = cols[0].text.strip(), cols[1].text.strip()
+                        try:
+                            # 尝试解析概率和目标区间
+                            if "%" in txt0: prob, target = float(txt0.replace("%", "")), txt1
+                            elif "%" in txt1: prob, target = float(txt1.replace("%", "")), txt0
+                            else: continue
+                            data_points.append({"prob": prob, "target": target})
+                        except: continue
+        except Exception as e:
+            print(f"❌ 概率表格抓取错误: {e}")
+
         # --- 如果主站没找到利率，启动 Plan B ---
         if detected_base_rate is None:
-            # 注意：这会跳转页面，但因为上面已经抓完表格数据存在 data_points 里了，所以跳转是安全的
+            # 这会跳转页面，但只要表格数据已存入 data_points，就是安全的
             backup_rate = fetch_backup_rate_from_tradingeconomics(driver)
             if backup_rate:
                 detected_base_rate = backup_rate
             else:
                 detected_base_rate = 3.75 # 最终兜底
-                print(f"⚠️ 双重抓取均失败，使用默认兜底: {detected_base_rate}%")
+                print(f"⚠️ [最终兜底] 无法检测真实利率，使用默认值: {detected_base_rate}%")
 
-        if not data_points: return None
+        if not data_points: 
+            print("❌ 未能抓取到任何概率数据")
+            return None
+            
         data_points.sort(key=lambda x: x['prob'], reverse=True)
         
         return {
@@ -175,7 +203,7 @@ def get_fed_data():
         }
 
     except Exception as e:
-        print(f"❌ Selenium 抓取错误: {e}")
+        print(f"❌ Selenium 致命错误: {e}")
         return None
     finally:
         if driver:
@@ -344,7 +372,7 @@ def run_breadth_task():
 if __name__ == "__main__":
     print("🚀 监控服务已启动")
     
-    print("🧪 [测试] 正在发送 FedWatch (含双重保险)...")
+    print("🧪 [测试] 正在发送 FedWatch (含双重保险+隐身)...")
     fed_data = get_fed_data()
     if fed_data: 
         send_fed_embed(fed_data)
