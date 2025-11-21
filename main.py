@@ -34,15 +34,13 @@ BREADTH_SCHEDULE_TIME = "16:30"
 # 🏛️ FedWatch 配置
 # ------------------------------------------
 FED_BOT_NAME = "CME FedWatch Bot"
-# 【已更新】FedWatch 新头像
 FED_BOT_AVATAR = "https://i.imgur.com/d8KLt6Z.png"
 
 # ------------------------------------------
 # 📊 市场广度 配置
 # ------------------------------------------
 BREADTH_BOT_NAME = "标普500 广度日报" 
-# 【已更新】市场广度 新头像 (.jpeg)
-BREADTH_BOT_AVATAR = "https://i.imgur.com/Segc5PF.jpeg" 
+BREADTH_BOT_AVATAR = "https://i.imgur.com/Segc5PF.jpeg"
 
 PREV_CUT_PROB = None
 
@@ -61,7 +59,6 @@ def get_bar(p):
     return "█" * filled + "░" * (length - filled)
 
 def format_target_label(target_str, current_rate_base):
-    """ 全自动判断逻辑 """
     try:
         lower_bound = float(target_str.split('-')[0].strip())
         if abs(lower_bound - current_rate_base) <= 0.05:
@@ -74,42 +71,31 @@ def format_target_label(target_str, current_rate_base):
         return target_str
 
 # ==========================================
-# 🟢 模块 1: 降息概率 (智能正则 + 校验 + 双保险)
+# 🟢 模块 1: 降息概率 (强制排序版)
 # ==========================================
 
 def fetch_backup_rate_from_tradingeconomics(driver):
-    """ Plan B: 暴力扫描整行，正则提取数字 """
-    print("🔄 [Plan B] 正在尝试 TradingEconomics (正则模式)...")
+    """ Plan B """
+    print("🔄 [Plan B] 正在尝试 TradingEconomics...")
     try:
         driver.get("https://tradingeconomics.com/united-states/interest-rate")
         time.sleep(5)
-        
-        # 找到包含 "Fed Interest Rate" 的整行元素
         row_element = driver.find_element(By.XPATH, "//tr[contains(., 'Fed Interest Rate')]")
         row_text = row_element.text
-        print(f"🔍 [Plan B] 扫描到行文本: {row_text}")
-        
-        # 提取第一个看起来像利率的浮点数
         match = re.search(r"(\d+\.\d+)", row_text)
-        
         if match:
-            rate_text = match.group(1)
-            upper_bound = float(rate_text)
-            
-            # 校验：利率范围保护
-            if 0.0 <= upper_bound <= 10.0:
-                lower_bound = upper_bound - 0.25
-                print(f"✅ [Plan B] 正则抓取成功: 上限 {upper_bound}%, 推算下限 {lower_bound}%")
-                return lower_bound
-            else:
-                print(f"⚠️ [Plan B] 抓到的数字 {upper_bound} 不像利率，跳过")
+            upper = float(match.group(1))
+            if 0.0 <= upper <= 10.0:
+                lower = upper - 0.25
+                print(f"✅ [Plan B] 成功: {lower}%")
+                return lower
         return None
     except Exception as e:
         print(f"❌ [Plan B] 失败: {e}")
         return None
 
 def get_fed_data():
-    print(f"⚡ 启动 Chromium (隐身模式)...")
+    print(f"⚡ 启动 Chromium...")
     options = Options()
     options.binary_location = "/usr/bin/chromium" 
     options.add_argument("--headless=new") 
@@ -126,27 +112,20 @@ def get_fed_data():
         service = Service("/usr/bin/chromedriver") 
         driver = webdriver.Chrome(service=service, options=options)
         driver.set_page_load_timeout(60)
-        
         driver.get("https://www.investing.com/central-banks/fed-rate-monitor")
         time.sleep(5) 
         
-        # --- Plan A: Investing.com (含范围校验) ---
+        # Plan A
         try:
             page_text = driver.find_element(By.TAG_NAME, "body").text
-            # 尝试抓取 Current ... Rate
             match = re.search(r"Current.*?Rate.*?(\d+\.?\d*)", page_text, re.IGNORECASE | re.DOTALL)
             if match:
                 val = float(match.group(1))
-                # 只有在 3.0 - 6.0 之间才信
                 if 3.0 <= val <= 6.0:
                     detected_base_rate = val
                     print(f"✅ [Plan A] 抓取成功: {detected_base_rate}%")
-                else:
-                    print(f"⚠️ [Plan A] 数字异常 ({val}%)，放弃")
-        except:
-            pass
+        except: pass
 
-        # --- 抓取概率表格 ---
         data_points = []
         try:
             tables = driver.find_elements(By.TAG_NAME, "table")
@@ -169,28 +148,22 @@ def get_fed_data():
                             else: continue
                             data_points.append({"prob": prob, "target": target})
                         except: continue
-        except Exception as e:
-            print(f"❌ 概率表格抓取错误: {e}")
+        except: pass
 
-        # --- Plan B & 兜底 ---
         if detected_base_rate is None:
             if data_points:
-                backup_rate = fetch_backup_rate_from_tradingeconomics(driver)
-                if backup_rate:
-                    detected_base_rate = backup_rate
-                else:
-                    detected_base_rate = DEFAULT_BASE_RATE
-                    print(f"⚠️ [最终兜底] 使用默认值: {detected_base_rate}%")
+                bk = fetch_backup_rate_from_tradingeconomics(driver)
+                detected_base_rate = bk if bk else DEFAULT_BASE_RATE
             else:
                  detected_base_rate = DEFAULT_BASE_RATE
 
         if not data_points: return None
-        data_points.sort(key=lambda x: x['prob'], reverse=True)
         
-        return {"current_base_rate": detected_base_rate, "data": data_points[:2]}
+        # 返回所有数据供 send_fed_embed 排序使用
+        return {"current_base_rate": detected_base_rate, "data": data_points}
 
     except Exception as e:
-        print(f"❌ Selenium 致命错误: {e}")
+        print(f"❌ Error: {e}")
         return None
     finally:
         if driver:
@@ -201,37 +174,85 @@ def send_fed_embed(data):
     global PREV_CUT_PROB
     if not data or not data['data']: return
     
-    top1 = data['data'][0]
-    top2 = data['data'][1] if len(data['data']) > 1 else None
     base_rate = data.get("current_base_rate", DEFAULT_BASE_RATE)
     
-    current_prob = top1['prob']
+    # 1. 计算降息趋势 (逻辑不变，依然追踪特定降息项)
+    current_cut_prob = 0.0
+    target_cut_lower = base_rate - 0.25
+    
+    # 将数据分类：降息项 vs 其他项
+    cut_item = None
+    rest_items = []
+    
+    for item in data['data']:
+        try:
+            lower = float(item['target'].split('-')[0].strip())
+            # 找到降息 25bp 的那一项
+            if abs(lower - target_cut_lower) <= 0.05:
+                cut_item = item
+                current_cut_prob = item['prob']
+            else:
+                rest_items.append(item)
+        except:
+            rest_items.append(item)
+    
+    # 计算变动
     delta = 0.0
-    if PREV_CUT_PROB is not None: delta = current_prob - PREV_CUT_PROB
-    PREV_CUT_PROB = current_prob
+    if PREV_CUT_PROB is not None:
+        delta = current_cut_prob - PREV_CUT_PROB
+    PREV_CUT_PROB = current_cut_prob
     
-    trend_text = "稳定"
-    trend_icon = "⚖️"
-    if delta > 1.0: 
-        trend_text = f"概率上升 +{delta:.1f}%"
-        trend_icon = "🔥"
-    elif delta < -1.0: 
-        trend_text = f"概率下降 {abs(delta):.1f}%"
-        trend_icon = "❄️"
+    # 趋势文案
+    trend_title = "📉 降息趋势变动"
+    if not cut_item and current_cut_prob == 0:
+        trend_text = "无降息预期"
+    elif delta > 0.1: 
+        trend_text = f"概率上升 +{delta:.1f}% 🔥"
+    elif delta < -0.1: 
+        trend_text = f"概率下降 {delta:.1f}% ❄️"
+    else:
+        trend_text = "稳定"
+
+    # ==================================================
+    # 🟢 排序逻辑调整：强制降息排第一
+    # ==================================================
+    display_list = []
     
-    label1_raw = format_target_label(top1['target'], base_rate)
+    # 1. 第一行：必须是降息项 (如果找到了)
+    if cut_item:
+        display_list.append(cut_item)
+    
+    # 2. 第二行：在剩下的项里，选概率最高的一个 (通常是维持)
+    if rest_items:
+        # 按概率从高到低排序
+        rest_items.sort(key=lambda x: x['prob'], reverse=True)
+        display_list.append(rest_items[0])
+    
+    # 如果没找到降息项 (极罕见)，就回退到只显示概率最高的两项
+    if not display_list:
+        data['data'].sort(key=lambda x: x['prob'], reverse=True)
+        display_list = data['data'][:2]
+
+    # ==================================================
+
+    # 准备第一名的 Label (用于华尔街共识)
+    # 注意：这里的 Top1 应该是概率最高的那个，而不是我们强制置顶的那个
+    # 所以要重新在全部数据里找概率第一
+    all_sorted = sorted(data['data'], key=lambda x: x['prob'], reverse=True)
+    top1_real = all_sorted[0]
+    
+    label1_raw = format_target_label(top1_real['target'], base_rate)
     if "(维持)" in label1_raw: consensus_short = "⏸️ 维持利率 (Hold)"
     elif "(降息)" in label1_raw: consensus_short = "📉 降息 (Cut)"
     else: consensus_short = "📈 加息 (Hike)"
 
+    # 构建 Embed 描述
     desc_lines = [f"**🗓️ 下次会议:** `{NEXT_MEETING_DATE}`\n"]
-    desc_lines.append(f"**目标: {label1_raw}**")
-    desc_lines.append(f"`{get_bar(top1['prob'])}` **{top1['prob']}%**\n")
     
-    if top2:
-        label2_raw = format_target_label(top2['target'], base_rate)
-        desc_lines.append(f"**目标: {label2_raw}**")
-        desc_lines.append(f"`{get_bar(top2['prob'])}` **{top2['prob']}%**")
+    for item in display_list:
+        label = format_target_label(item['target'], base_rate)
+        desc_lines.append(f"**目标: {label}**")
+        desc_lines.append(f"`{get_bar(item['prob'])}` **{item['prob']}%**\n")
     
     desc_lines.append("\n------------------------")
 
@@ -243,7 +264,7 @@ def send_fed_embed(data):
             "description": "\n".join(desc_lines),
             "color": 0x3498DB,
             "fields": [
-                {"name": f"{trend_icon} 趋势变动", "value": trend_text, "inline": True},
+                {"name": trend_title, "value": trend_text, "inline": True},
                 {"name": "💡 华尔街共识", "value": consensus_short, "inline": True}
             ],
             "footer": {"text": f"Updated at {datetime.now().strftime('%H:%M')} ET"}
@@ -293,7 +314,6 @@ def run_breadth_task():
             resp = requests.get(url, headers=headers, timeout=10)
             tables = pd.read_html(io.StringIO(resp.text))
             df_tickers = next((df for df in tables if 'Symbol' in df.columns), None)
-            if df_tickers is None: raise ValueError("未找到表格")
             tickers = [t.replace('.', '-') for t in df_tickers['Symbol'].tolist()] 
         except:
             tickers = ['AAPL', 'MSFT', 'NVDA', 'AMZN', 'GOOGL', 'META', 'TSLA', 'BRK-B', 'LLY', 'AVGO']
@@ -351,7 +371,7 @@ def run_breadth_task():
 if __name__ == "__main__":
     print("🚀 监控服务已启动")
     
-    print("🧪 [测试] 正在发送 FedWatch (含修复头像+全自动修复)...")
+    print("🧪 [测试] 正在发送 FedWatch (强制排序版)...")
     fed_data = get_fed_data()
     if fed_data: 
         send_fed_embed(fed_data)
