@@ -262,7 +262,7 @@ def send_fed_embed(data):
         "embeds": [{
             "title": "🏛️ CME FedWatch™ (降息预期)",
             "description": "\n".join(desc_lines),
-            "color": 0x000000,  # ✅ 颜色已改为黑色 (Black)
+            "color": 0x3498DB,
             "fields": [
                 {"name": trend_title, "value": trend_text, "inline": True},
                 {"name": "💡 华尔街共识", "value": consensus_short, "inline": True}
@@ -303,7 +303,7 @@ def get_market_sentiment(p):
     if p > 60: return "🔥 **火热**"      
     if p < 20: return "❄️❄️ **深度寒冷**"
     if p < 40: return "❄️ **寒冷**"      
-    return "🍃 **稳定**"     
+    return "🍃 **稳定**"    
 
 def run_breadth_task():
     print("📊 启动市场广度统计...")
