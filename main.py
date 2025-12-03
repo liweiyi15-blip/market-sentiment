@@ -33,14 +33,14 @@ BREADTH_SCHEDULE_TIME = "16:30"
 # ------------------------------------------
 # 🏛️ FedWatch 配置
 # ------------------------------------------
-FED_BOT_NAME = "CME FedWatch Bot"
-FED_BOT_AVATAR = "https://i.imgur.com/d8KLt6Z.png"
+FED_BOT_NAME = "讯-全域信息感知雷达"
+FED_BOT_AVATAR = "https://i.imgur.com/bmuS9oI.jpeg"
 
 # ------------------------------------------
 # 📊 市场广度 配置
 # ------------------------------------------
-BREADTH_BOT_NAME = "标普500 广度日报" 
-BREADTH_BOT_AVATAR = "https://i.imgur.com/Segc5PF.jpeg"
+BREADTH_BOT_NAME = "讯-全域信息感知雷达" 
+BREADTH_BOT_AVATAR = "https://i.imgur.com/bmuS9oI.jpeg"
 
 PREV_CUT_PROB = None
 
@@ -107,7 +107,7 @@ def get_fed_data():
 
     driver = None
     detected_base_rate = None
-    
+     
     try:
         service = Service("/usr/bin/chromedriver") 
         driver = webdriver.Chrome(service=service, options=options)
@@ -303,7 +303,7 @@ def get_market_sentiment(p):
     if p > 60: return "🔥 **火热**"      
     if p < 20: return "❄️❄️ **深度寒冷**"
     if p < 40: return "❄️ **寒冷**"      
-    return "🍃 **稳定**"    
+    return "🍃 **稳定**"     
 
 def run_breadth_task():
     print("📊 启动市场广度统计...")
