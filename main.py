@@ -334,7 +334,7 @@ def send_fed_embed(data):
         "username": FED_BOT_NAME,
         "avatar_url": FED_BOT_AVATAR,
         "embeds": [{
-            "title": "🏛️ CME FedWatch™ (智能预测版)",
+            "title": "🏛️ CME FedWatch™",
             "description": "\n".join(desc_lines),
             "color": 0x3498DB,
             "fields": [
