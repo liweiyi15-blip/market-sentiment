@@ -23,8 +23,6 @@ from selenium.webdriver.common.by import By
 # ==========================================
 
 WEBHOOK_URL = os.getenv("WEBHOOK_URL") 
-NEXT_MEETING_DATE = "2025-12-10"
-DEFAULT_BASE_RATE = 3.75 
 
 # ⏰ 时间表 (美东时间 ET)
 FED_SCHEDULE_TIMES = ["08:31", "09:31", "11:31", "13:31", "15:31"]
@@ -44,9 +42,52 @@ BREADTH_BOT_AVATAR = "https://i.imgur.com/Segc5PF.jpeg"
 
 PREV_CUT_PROB = None
 
+# 【保底策略】万一爬虫死活抓不到日期，才用这个表
+BACKUP_SCHEDULE = [
+    "2025-12-10", "2026-01-28", "2026-03-18", "2026-05-06", 
+    "2026-06-17", "2026-07-29", "2026-09-16", "2026-11-04", "2026-12-16"
+]
+# 【保底策略】万一爬虫抓不到当前利率
+DEFAULT_BACKUP_RATE = 3.50 
+
 # ==========================================
 # 🛠️ 辅助函数
 # ==========================================
+
+def parse_date_string(date_text):
+    """
+    尝试将网页上的各种日期文本 (e.g., 'Dec 10, 2025') 转化为 '2025-12-10'
+    """
+    if not date_text: return None
+    try:
+        # 清理文本，只保留字母数字和逗号
+        clean_text = re.sub(r'[^\w\s,]', '', date_text).strip()
+        
+        # 常见格式 1: Dec 10, 2025
+        try:
+            dt = datetime.strptime(clean_text, "%b %d, %Y")
+            return dt.strftime("%Y-%m-%d")
+        except: pass
+        
+        # 常见格式 2: December 10, 2025
+        try:
+            dt = datetime.strptime(clean_text, "%B %d, %Y")
+            return dt.strftime("%Y-%m-%d")
+        except: pass
+
+        return None
+    except:
+        return None
+
+def get_backup_meeting_date():
+    """从硬编码列表中找下一个日期（仅作为爬虫失败的备选）"""
+    tz = pytz.timezone('US/Eastern')
+    today_str = datetime.now(tz).strftime("%Y-%m-%d")
+    for meeting_date in BACKUP_SCHEDULE:
+        if meeting_date >= today_str:
+            return meeting_date
+    return "TBD"
+
 def is_market_holiday(now_et):
     if now_et.weekday() >= 5: return True, "周末休市"
     us_holidays = holidays.US(years=now_et.year) 
@@ -61,6 +102,7 @@ def get_bar(p):
 def format_target_label(target_str, current_rate_base):
     try:
         lower_bound = float(target_str.split('-')[0].strip())
+        # 允许微小误差
         if abs(lower_bound - current_rate_base) <= 0.05:
             return f"{target_str} (维持)"
         elif lower_bound < current_rate_base:
@@ -71,28 +113,61 @@ def format_target_label(target_str, current_rate_base):
         return target_str
 
 # ==========================================
-# 🟢 模块 1: 降息概率 (强制排序版)
+# 🟢 模块 1: 降息概率 (全自动爬虫版)
 # ==========================================
 
-def fetch_backup_rate_from_tradingeconomics(driver):
-    """ Plan B """
-    print("🔄 [Plan B] 正在尝试 TradingEconomics...")
+def scrape_header_info(driver, page_text):
+    """
+    尝试从页面抓取：
+    1. 当前利率 (Current Rate)
+    2. 下次会议日期 (Next Meeting Date)
+    """
+    rate = None
+    meeting_date = None
+
+    # --- 1. 抓取当前利率 ---
+    # 尝试正则匹配 "Current Rate: 4.25" 或 "Current Target Rate: 4.25-4.50"
+    # 我们只取区间的下限或单一数值
     try:
-        driver.get("https://tradingeconomics.com/united-states/interest-rate")
-        time.sleep(5)
-        row_element = driver.find_element(By.XPATH, "//tr[contains(., 'Fed Interest Rate')]")
-        row_text = row_element.text
-        match = re.search(r"(\d+\.\d+)", row_text)
-        if match:
-            upper = float(match.group(1))
-            if 0.0 <= upper <= 10.0:
-                lower = upper - 0.25
-                print(f"✅ [Plan B] 成功: {lower}%")
-                return lower
-        return None
-    except Exception as e:
-        print(f"❌ [Plan B] 失败: {e}")
-        return None
+        # 寻找类似于 "Current Rate 4.50" 的文本
+        rate_match = re.search(r"Current.*?Rate.*?(\d+\.\d+)", page_text, re.IGNORECASE)
+        if rate_match:
+            val = float(rate_match.group(1))
+            # 过滤异常值
+            if 0.0 <= val <= 10.0:
+                rate = val
+    except: pass
+
+    # --- 2. 抓取会议日期 ---
+    # Investing.com 通常有个下拉框或者标题显示 Meeting Date
+    try:
+        # 策略 A: 找含有 class="date" 或 id="meetingDate" 的元素
+        # 这是一个通用猜测，具体依赖页面结构
+        date_elements = driver.find_elements(By.XPATH, "//*[contains(@class, 'date') or contains(@id, 'date')]")
+        
+        # 策略 B: 直接搜寻月份单词 (Jan, Feb...) + 数字 + 年份
+        # 这是一种暴力但有效的方法
+        months = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"]
+        date_pattern = re.compile(r'(?:' + '|'.join(months) + r')\.?\s+\d{1,2},?\s+\d{4}', re.IGNORECASE)
+        
+        # 在页面前 2000 个字符里找日期（通常日期在顶部）
+        top_text = page_text[:2000]
+        dates_found = date_pattern.findall(top_text)
+        
+        tz = pytz.timezone('US/Eastern')
+        today = datetime.now(tz).date()
+
+        for d_str in dates_found:
+            parsed = parse_date_string(d_str)
+            if parsed:
+                # 必须是未来或者今天的日期才算数
+                p_date = datetime.strptime(parsed, "%Y-%m-%d").date()
+                if p_date >= today:
+                    meeting_date = parsed
+                    break # 找到了最近的一个未来日期
+    except: pass
+
+    return rate, meeting_date
 
 def get_fed_data():
     print(f"⚡ 启动 Chromium...")
@@ -106,8 +181,14 @@ def get_fed_data():
     options.add_argument("user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64)")
 
     driver = None
-    detected_base_rate = None
     
+    # 最终结果容器
+    result = {
+        "current_base_rate": None,
+        "next_meeting": None,
+        "data": []
+    }
+     
     try:
         service = Service("/usr/bin/chromedriver") 
         driver = webdriver.Chrome(service=service, options=options)
@@ -115,17 +196,28 @@ def get_fed_data():
         driver.get("https://www.investing.com/central-banks/fed-rate-monitor")
         time.sleep(5) 
         
-        # Plan A
-        try:
-            page_text = driver.find_element(By.TAG_NAME, "body").text
-            match = re.search(r"Current.*?Rate.*?(\d+\.?\d*)", page_text, re.IGNORECASE | re.DOTALL)
-            if match:
-                val = float(match.group(1))
-                if 3.0 <= val <= 6.0:
-                    detected_base_rate = val
-                    print(f"✅ [Plan A] 抓取成功: {detected_base_rate}%")
-        except: pass
+        # 获取页面全文本用于分析
+        page_text = driver.find_element(By.TAG_NAME, "body").text
+        
+        # 🧠 智能分析：抓取头部信息 (利率 + 日期)
+        scraped_rate, scraped_date = scrape_header_info(driver, page_text)
+        
+        if scraped_rate:
+            print(f"✅ 自动检测到当前利率: {scraped_rate}%")
+            result["current_base_rate"] = scraped_rate
+        else:
+            print(f"⚠️ 未检测到利率，使用保底值: {DEFAULT_BACKUP_RATE}%")
+            result["current_base_rate"] = DEFAULT_BACKUP_RATE
+            
+        if scraped_date:
+            print(f"✅ 自动检测到下次会议: {scraped_date}")
+            result["next_meeting"] = scraped_date
+        else:
+            bk_date = get_backup_meeting_date()
+            print(f"⚠️ 未检测到日期，使用保底表: {bk_date}")
+            result["next_meeting"] = bk_date
 
+        # --- 抓取概率表格 (原有逻辑) ---
         data_points = []
         try:
             tables = driver.find_elements(By.TAG_NAME, "table")
@@ -150,17 +242,10 @@ def get_fed_data():
                         except: continue
         except: pass
 
-        if detected_base_rate is None:
-            if data_points:
-                bk = fetch_backup_rate_from_tradingeconomics(driver)
-                detected_base_rate = bk if bk else DEFAULT_BASE_RATE
-            else:
-                 detected_base_rate = DEFAULT_BASE_RATE
-
         if not data_points: return None
         
-        # 返回所有数据供 send_fed_embed 排序使用
-        return {"current_base_rate": detected_base_rate, "data": data_points}
+        result["data"] = data_points
+        return result
 
     except Exception as e:
         print(f"❌ Error: {e}")
@@ -174,13 +259,13 @@ def send_fed_embed(data):
     global PREV_CUT_PROB
     if not data or not data['data']: return
     
-    base_rate = data.get("current_base_rate", DEFAULT_BASE_RATE)
+    base_rate = data.get("current_base_rate")
+    next_meeting_date = data.get("next_meeting")
     
-    # 1. 计算降息趋势 (逻辑不变，依然追踪特定降息项)
+    # 1. 计算降息趋势
     current_cut_prob = 0.0
     target_cut_lower = base_rate - 0.25
     
-    # 将数据分类：降息项 vs 其他项
     cut_item = None
     rest_items = []
     
@@ -202,7 +287,6 @@ def send_fed_embed(data):
         delta = current_cut_prob - PREV_CUT_PROB
     PREV_CUT_PROB = current_cut_prob
     
-    # 趋势文案
     trend_title = "📉 降息趋势变动"
     if not cut_item and current_cut_prob == 0:
         trend_text = "无降息预期"
@@ -214,30 +298,19 @@ def send_fed_embed(data):
         trend_text = "稳定"
 
     # ==================================================
-    # 🟢 排序逻辑调整：强制降息排第一
+    # 排序显示
     # ==================================================
     display_list = []
-    
-    # 1. 第一行：必须是降息项 (如果找到了)
-    if cut_item:
-        display_list.append(cut_item)
-    
-    # 2. 第二行：在剩下的项里，选概率最高的一个 (通常是维持)
+    if cut_item: display_list.append(cut_item)
     if rest_items:
-        # 按概率从高到低排序
         rest_items.sort(key=lambda x: x['prob'], reverse=True)
         display_list.append(rest_items[0])
     
-    # 如果没找到降息项 (极罕见)，就回退到只显示概率最高的两项
     if not display_list:
         data['data'].sort(key=lambda x: x['prob'], reverse=True)
         display_list = data['data'][:2]
 
-    # ==================================================
-
-    # 准备第一名的 Label (用于华尔街共识)
-    # 注意：这里的 Top1 应该是概率最高的那个，而不是我们强制置顶的那个
-    # 所以要重新在全部数据里找概率第一
+    # 华尔街共识
     all_sorted = sorted(data['data'], key=lambda x: x['prob'], reverse=True)
     top1_real = all_sorted[0]
     
@@ -246,8 +319,9 @@ def send_fed_embed(data):
     elif "(降息)" in label1_raw: consensus_short = "📉 降息 (Cut)"
     else: consensus_short = "📈 加息 (Hike)"
 
-    # 构建 Embed 描述
-    desc_lines = [f"**🗓️ 下次会议:** `{NEXT_MEETING_DATE}`\n"]
+    # 构建 Embed 
+    # 这里直接使用爬虫爬到的 next_meeting_date
+    desc_lines = [f"**🗓️ 下次会议:** `{next_meeting_date}`\n"]
     
     for item in display_list:
         label = format_target_label(item['target'], base_rate)
@@ -260,21 +334,34 @@ def send_fed_embed(data):
         "username": FED_BOT_NAME,
         "avatar_url": FED_BOT_AVATAR,
         "embeds": [{
-            "title": "🏛️ CME FedWatch™ (降息预期)",
+            "title": "🏛️ CME FedWatch™ (智能预测版)",
             "description": "\n".join(desc_lines),
             "color": 0x3498DB,
             "fields": [
-                {"name": trend_title, "value": trend_text, "inline": True},
-                {"name": "💡 华尔街共识", "value": consensus_short, "inline": True}
+                {
+                    "name": trend_title, 
+                    "value": trend_text, 
+                    "inline": True
+                },
+                {
+                    "name": "💡 华尔街共识", 
+                    "value": consensus_short, 
+                    "inline": True
+                },
+                {
+                    "name": "📊 当前基准利率", 
+                    "value": f"{base_rate}%", 
+                    "inline": False 
+                }
             ],
-            "footer": {"text": f"Updated at {datetime.now().strftime('%H:%M')} ET"}
+            "footer": {"text": f"Updated at {datetime.now().strftime('%H:%M')} ET | Auto-Scraped"}
         }]
     }
     try: requests.post(WEBHOOK_URL, json=payload)
     except Exception as e: print(f"❌ 推送失败: {e}")
 
 # ==========================================
-# 🔵 模块 2: 市场广度
+# 🔵 模块 2: 市场广度 (保持不变)
 # ==========================================
 def generate_breadth_chart(breadth_20_series, breadth_50_series):
     plt.style.use('dark_background')
@@ -371,7 +458,7 @@ def run_breadth_task():
 if __name__ == "__main__":
     print("🚀 监控服务已启动")
     
-    print("🧪 [测试] 正在发送 FedWatch (强制排序版)...")
+    print("🧪 [测试] 正在发送 FedWatch (智能爬虫版)...")
     fed_data = get_fed_data()
     if fed_data: 
         send_fed_embed(fed_data)
