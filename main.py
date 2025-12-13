@@ -25,7 +25,12 @@ from selenium.webdriver.common.by import By
 WEBHOOK_URL = os.getenv("WEBHOOK_URL") 
 
 # ⏰ 时间表 (美东时间 ET)
-FED_SCHEDULE_TIMES = ["08:31", "09:31", "11:31", "13:31", "15:31"]
+# 对应北京时间：
+# 冬令时: 21:31, 23:31, 04:01
+# 夏令时: 20:31, 22:31, 03:01
+FED_SCHEDULE_TIMES = ["08:31", "10:31", "15:01"]
+
+# 市场广度时间 (美东 16:30)
 BREADTH_SCHEDULE_TIME = "16:30"
 
 # ------------------------------------------
@@ -89,7 +94,9 @@ def get_backup_meeting_date():
     return "TBD"
 
 def is_market_holiday(now_et):
+    # 周末判断 (5=周六, 6=周日)
     if now_et.weekday() >= 5: return True, "周末休市"
+    # 美股假期判断
     us_holidays = holidays.US(years=now_et.year) 
     if now_et.date() in us_holidays: return True, f"假期: {us_holidays.get(now_et.date())}"
     return False, None
@@ -390,7 +397,7 @@ def get_market_sentiment(p):
     if p > 60: return "🔥 **火热**"      
     if p < 20: return "❄️❄️ **深度寒冷**"
     if p < 40: return "❄️ **寒冷**"      
-    return "🍃 **稳定**"    
+    return "🍃 **稳定**"     
 
 def run_breadth_task():
     print("📊 启动市场广度统计...")
@@ -476,15 +483,26 @@ if __name__ == "__main__":
         tz = pytz.timezone('US/Eastern')
         now_et = datetime.now(tz)
         current_str = now_et.strftime("%H:%M")
-        is_holiday, _ = is_market_holiday(now_et)
+        is_holiday, holiday_name = is_market_holiday(now_et)
 
         if current_str != last_run_time_str:
-            print(f"⏰ {current_str} ET")
-            if not is_holiday and current_str in FED_SCHEDULE_TIMES:
-                data = get_fed_data()
-                if data: send_fed_embed(data)
-            if not is_holiday and current_str == BREADTH_SCHEDULE_TIME:
-                run_breadth_task()
+            print(f"⏰ {current_str} ET (Market Open: {not is_holiday})")
+            
+            # 只有在非假期/非周末时才推送
+            if not is_holiday:
+                if current_str in FED_SCHEDULE_TIMES:
+                    print(f"🔔 触发 FedWatch 定时推送: {current_str}")
+                    data = get_fed_data()
+                    if data: send_fed_embed(data)
+                
+                if current_str == BREADTH_SCHEDULE_TIME:
+                    print(f"🔔 触发 市场广度 定时推送: {current_str}")
+                    run_breadth_task()
+            else:
+                # 假期/周末时，只打印心跳，不推送
+                if current_str in FED_SCHEDULE_TIMES or current_str == BREADTH_SCHEDULE_TIME:
+                    print(f"😴 今日休市 ({holiday_name})，跳过推送")
+
             last_run_time_str = current_str
         
         time.sleep(30)
