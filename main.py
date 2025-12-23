@@ -36,6 +36,11 @@ BREADTH_SCHEDULE_TIME = "16:30"
 # ------------------------------------------
 # 🏛️ FedWatch 配置
 # ------------------------------------------
+# [开关] 控制 CME FedWatch Bot 是否运行
+# True = 开启 (会启动 Chromium 爬虫)
+# False = 关闭 (跳过执行，节省 Railway 资源)
+ENABLE_FED_BOT = False 
+
 FED_BOT_NAME = "CME FedWatch Bot"
 FED_BOT_AVATAR = "https://i.imgur.com/d8KLt6Z.png"
 
@@ -177,6 +182,10 @@ def scrape_header_info(driver, page_text):
     return rate, meeting_date
 
 def get_fed_data():
+    if not ENABLE_FED_BOT:
+        print("⏸️ [系统] FedWatch Bot 已禁用，跳过抓取...")
+        return None
+
     print(f"⚡ 启动 Chromium...")
     options = Options()
     options.binary_location = "/usr/bin/chromium" 
@@ -195,7 +204,7 @@ def get_fed_data():
         "next_meeting": None,
         "data": []
     }
-     
+      
     try:
         service = Service("/usr/bin/chromedriver") 
         driver = webdriver.Chrome(service=service, options=options)
@@ -465,13 +474,16 @@ def run_breadth_task():
 if __name__ == "__main__":
     print("🚀 监控服务已启动")
     
-    print("🧪 [测试] 正在发送 FedWatch (智能爬虫版)...")
-    fed_data = get_fed_data()
-    if fed_data: 
-        send_fed_embed(fed_data)
-        print("✅ FedWatch 测试完成")
+    if ENABLE_FED_BOT:
+        print("🧪 [测试] 正在发送 FedWatch (智能爬虫版)...")
+        fed_data = get_fed_data()
+        if fed_data: 
+            send_fed_embed(fed_data)
+            print("✅ FedWatch 测试完成")
+        else:
+            print("⚠️ FedWatch 获取失败")
     else:
-        print("⚠️ FedWatch 获取失败")
+        print("⏸️ [测试] FedWatch 已禁用，跳过测试")
 
     print("🧪 [测试] 正在发送 市场广度...")
     run_breadth_task()
@@ -491,9 +503,12 @@ if __name__ == "__main__":
             # 只有在非假期/非周末时才推送
             if not is_holiday:
                 if current_str in FED_SCHEDULE_TIMES:
-                    print(f"🔔 触发 FedWatch 定时推送: {current_str}")
-                    data = get_fed_data()
-                    if data: send_fed_embed(data)
+                    if ENABLE_FED_BOT:
+                        print(f"🔔 触发 FedWatch 定时推送: {current_str}")
+                        data = get_fed_data()
+                        if data: send_fed_embed(data)
+                    else:
+                        print(f"⏸️ 时间到达 {current_str}，但 FedWatch 已禁用，跳过执行")
                 
                 if current_str == BREADTH_SCHEDULE_TIME:
                     print(f"🔔 触发 市场广度 定时推送: {current_str}")
