@@ -1,5 +1,5 @@
-# 使用 Python 3.9 Slim 版本 (基于 Debian)
-FROM python:3.9-slim
+# 使用 Python 3.10 Slim 版本 (基于 Debian)
+FROM python:3.10-slim
 
 # 🔥 关键：强制 Python 实时打印日志 (解决日志卡顿)
 ENV PYTHONUNBUFFERED=1
