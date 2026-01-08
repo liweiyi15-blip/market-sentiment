@@ -379,22 +379,55 @@ def send_fed_embed(data):
 # ==========================================
 # 🔵 模块 2: 市场广度 (保持不变)
 # ==========================================
+# === 粘贴这段新代码 ===
 def generate_breadth_chart(breadth_20_series, breadth_50_series):
     plt.style.use('dark_background')
     fig, ax = plt.subplots(figsize=(10, 5))
+    
+    # 绘制折线
     ax.plot(breadth_20_series.index, breadth_20_series.values, color='#f1c40f', linewidth=2, label='Stocks > 20 Day SMA %')
     ax.plot(breadth_50_series.index, breadth_50_series.values, color='#e74c3c', linewidth=2, label='Stocks > 50 Day SMA %')
     ax.fill_between(breadth_20_series.index, breadth_20_series.values, alpha=0.1, color='#f1c40f')
-    ax.axhline(y=80, color='#ff5252', linestyle='--', linewidth=1, alpha=0.8) 
+    
+    # 绘制 80/20 警戒线
+    ax.axhline(y=80, color='#ff5252', linestyle='--', linewidth=1, alpha=0.8)
     ax.text(breadth_20_series.index[0], 81, 'Overbought (80%)', color='#ff5252', fontsize=8)
-    ax.axhline(y=20, color='#448aff', linestyle='--', linewidth=1, alpha=0.8) 
+    ax.axhline(y=20, color='#448aff', linestyle='--', linewidth=1, alpha=0.8)
     ax.text(breadth_20_series.index[0], 21, 'Oversold (20%)', color='#448aff', fontsize=8)
+
+    # --- 【修改点1】强制横轴从最左边的数据开始 ---
+    # left=... 设定了左边界，Right不设限让它自动适应
+    ax.set_xlim(left=breadth_20_series.index[0], right=breadth_20_series.index[-1])
+
+    # --- 【修改点2】在图表上标注当前数值 ---
+    last_date = breadth_20_series.index[-1]
+    last_val_20 = breadth_20_series.iloc[-1]
+    last_val_50 = breadth_50_series.iloc[-1]
+
+    # 给 20日线添加数值 (黄色)
+    ax.annotate(f'{last_val_20:.1f}%', 
+                xy=(last_date, last_val_20), 
+                xytext=(-10, 10), textcoords='offset points', # 文字向左上方偏移一点，防止切断
+                color='#f1c40f', fontsize=11, fontweight='bold', 
+                ha='right', bbox=dict(boxstyle="round,pad=0.3", fc="#2f3136", ec="#f1c40f", alpha=0.8))
+
+    # 给 50日线添加数值 (红色)
+    ax.annotate(f'{last_val_50:.1f}%', 
+                xy=(last_date, last_val_50), 
+                xytext=(-10, -20), textcoords='offset points', # 文字向左下方偏移一点
+                color='#e74c3c', fontsize=11, fontweight='bold', 
+                ha='right', bbox=dict(boxstyle="round,pad=0.3", fc="#2f3136", ec="#e74c3c", alpha=0.8))
+    # ----------------------------------------
+
     ax.set_title('S&P 500 Market Breadth (20 & 50 Day SMA)', fontsize=12, color='white', pad=15)
     ax.set_ylim(0, 100)
     ax.grid(True, linestyle=':', alpha=0.3)
     ax.xaxis.set_major_formatter(mdates.DateFormatter('%b %Y'))
     plt.xticks(rotation=0)
+    
+    # 图例
     ax.legend(loc='upper left', frameon=True, facecolor='#2f3136', edgecolor='#2f3136', labelcolor='white')
+    
     buf = io.BytesIO()
     plt.savefig(buf, format='png', bbox_inches='tight', dpi=100, facecolor='#2b2d31')
     buf.seek(0)
