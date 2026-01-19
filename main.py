@@ -469,15 +469,16 @@ def run_breadth_task():
             tickers = ['AAPL', 'MSFT', 'NVDA', 'AMZN', 'GOOGL', 'META', 'TSLA', 'BRK-B', 'LLY', 'AVGO']
 
         warnings.simplefilter(action='ignore', category=FutureWarning)
+        # ... 上面的清理缓存代码 ...
         try:
             if os.path.exists('yfinance.cache'): shutil.rmtree('yfinance.cache')
         except: pass
 
-        # 下载数据
-        data = yf.download(tickers, period="1y", progress=False) 
+        # === 🟢 修改为下载 2 年数据 (period="2y") ===
+        # 这样前 50 天的计算死角就会被留在过去，只保留有效数据
+        data = yf.download(tickers, period="2y", progress=False) 
         if 'Close' in data.columns: closes = data['Close']
         else: closes = data
-
         sma20_df = closes.rolling(window=20).mean()
         sma50_df = closes.rolling(window=50).mean()
         
