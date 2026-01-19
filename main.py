@@ -10,14 +10,18 @@ import json
 import warnings
 import re
 import shutil 
+import matplotlib
+# ⚠️【优化点1】强制使用非交互式后端，大幅节省内存
+matplotlib.use('Agg') 
 import matplotlib.pyplot as plt
 import matplotlib.dates as mdates
+# ⚠️【优化点2】引入垃圾回收机制
+import gc 
 from datetime import datetime, timedelta
 from selenium import webdriver
 from selenium.webdriver.chrome.service import Service
 from selenium.webdriver.chrome.options import Options
 from selenium.webdriver.common.by import By
-
 # ==========================================
 # ⚙️ 全局配置区
 # ==========================================
@@ -428,10 +432,14 @@ def generate_breadth_chart(breadth_20_series, breadth_50_series):
     # 图例
     ax.legend(loc='upper left', frameon=True, facecolor='#2f3136', edgecolor='#2f3136', labelcolor='white')
     
+    # ... 上面的代码保持不变 ...
+    
     buf = io.BytesIO()
     plt.savefig(buf, format='png', bbox_inches='tight', dpi=100, facecolor='#2b2d31')
     buf.seek(0)
-    plt.close()
+    
+    # ⚠️【优化点4】使用 close('all') 确保彻底关闭所有画板
+    plt.close('all') 
     return buf
 
 def get_market_sentiment(p):
@@ -443,6 +451,12 @@ def get_market_sentiment(p):
 
 def run_breadth_task():
     print("📊 启动市场广度统计...")
+    # 定义变量名以便后续清理，防止报错
+    data = None
+    closes = None
+    sma20_df = None
+    sma50_df = None
+    
     try:
         try:
             url = 'https://en.wikipedia.org/wiki/List_of_S%26P_500_companies'
@@ -459,6 +473,7 @@ def run_breadth_task():
             if os.path.exists('yfinance.cache'): shutil.rmtree('yfinance.cache')
         except: pass
 
+        # 下载数据
         data = yf.download(tickers, period="1y", progress=False) 
         if 'Close' in data.columns: closes = data['Close']
         else: closes = data
@@ -496,10 +511,27 @@ def run_breadth_task():
         
         files = {'file': ('chart.png', chart_buffer, 'image/png')}
         requests.post(WEBHOOK_URL, data={'payload_json': json.dumps(payload_data)}, files=files)
+        
+        # 关闭buffer，释放图片内存
+        chart_buffer.close()
         print(f"✅ 广度报告已推送")
 
     except Exception as e:
         print(f"❌ 广度任务异常: {e}")
+    
+    finally:
+        # ⚠️【优化点3】主动清理内存
+        # 无论成功还是失败，都强制删除大型数据变量
+        print("🧹 正在清理内存...")
+        try:
+            del data
+            del closes
+            del sma20_df
+            del sma50_df
+        except: pass
+        
+        # 强制运行垃圾回收，把内存归还给 Railway
+        gc.collect()
 
 # ==========================================
 # 🚀 主程序
