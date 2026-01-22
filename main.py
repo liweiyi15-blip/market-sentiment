@@ -491,7 +491,7 @@ def calculate_rank_change(current_rank, old_rank):
     else: return "➖"
 
 def run_reddit_task():
-    # 这里调用上面定义的 get_apewisdom_data
+    # 1. 获取数据
     data = get_apewisdom_data()
     if not data:
         return
@@ -505,28 +505,27 @@ def run_reddit_task():
         mentions = item.get('mentions', 0)
         rank_24h = item.get('rank_24h_ago', 0)
         
-        # 1. 获取变动字符
+        # 2. 获取变动字符
         change_raw = calculate_rank_change(rank, rank_24h)
         
-        # 2. 名字处理 (截断防止换行)
+        # 3. 名字处理
         name = name.replace("&amp;", "&").replace("\n", " ").strip()
         if len(name) > 8: name = name[:8] + "."
         
-        # 3. 【核心黑科技】构建对齐头部
-        # 格式：`➖    01.` (强行等宽)
+        # 4. 头部排版 (保持黑底以维持对齐)
         header_block = f"` {change_raw:<5} {rank:02d}. `"
         
-        # 4. 拼接
-        # 效果: `🔺5    02.` **$NVDA** (NVIDIA.) `提及 1024`
-        line = f"{header_block} **${ticker}** ({name}) `提及 {mentions}`"
+        # 5. 拼接 (修改点：只给 mentions 数字加了反引号 ` `)
+        # 效果: `🔺5    02.` **$NVDA** (NVIDIA.) 提及 `1024`次
+        line = f"{header_block} **${ticker}** ({name}) 提及 `{mentions}`次"
         
         desc_lines.append(line)
 
     date_str = datetime.now().strftime('%m月%d日') 
     
     payload = {
-        "username": "Reddit 舆情雷达", 
-        "avatar_url": "https://i.imgur.com/8Qj5X9A.png", 
+        "username": "散户买什么？", 
+        "avatar_url": "https://i.imgur.com/iXlOzKP.png", 
         "embeds": [{
             "title": f"Reddit 24H 热度榜（{date_str}）",
             "description": "\n".join(desc_lines),
@@ -536,7 +535,7 @@ def run_reddit_task():
     
     try:
         requests.post(WEBHOOK_URL, json=payload)
-        print("✅ ApeWisdom Top30 推送成功 (排版修复版)")
+        print("✅ ApeWisdom Top30 推送成功 (数字独立高亮版)")
     except Exception as e:
         print(f"❌ 推送失败: {e}")
         
