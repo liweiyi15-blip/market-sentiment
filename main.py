@@ -451,11 +451,37 @@ def calculate_rank_change(current_rank, old_rank):
         return "➖" # 持平
 
 # ==========================================
-# 🔴 模块 3: Reddit 热度榜 (最终完美对齐版)
+# 🔴 模块 3: Reddit 热度榜 (完整修复+完美对齐版)
 # ==========================================
 
-# 1. 辅助函数：计算变动 (返回纯文本，不带空格)
+def get_apewisdom_data():
+    """
+    使用 ApeWisdom API 获取 Reddit (WSB/Stocks) 热门股票
+    """
+    print("📡 正在从 ApeWisdom 获取数据...")
+    url = "https://apewisdom.io/api/v1.0/filter/all-stocks/page/1"
+    
+    try:
+        headers = {
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+        }
+        response = requests.get(url, headers=headers, timeout=20)
+        
+        if response.status_code == 200:
+            data = response.json()
+            results = data.get('results', [])
+            return results[:30] # Top 30
+        else:
+            print(f"⚠️ ApeWisdom API 错误: {response.status_code}")
+            return None
+    except Exception as e:
+        print(f"❌ 获取 ApeWisdom 数据失败: {e}")
+        return None
+
 def calculate_rank_change(current_rank, old_rank):
+    """
+    计算排名变化图标
+    """
     if not old_rank or old_rank == 0:
         return "🆕"
     
@@ -464,16 +490,8 @@ def calculate_rank_change(current_rank, old_rank):
     elif diff < 0: return f"🔻{abs(diff)}"
     else: return "➖"
 
-# 2. 辅助函数：获取全角/半角混合字符串的显示宽度 (简单修正)
-def get_pad_text(text, length=6):
-    """
-    一个简单的补位函数，确保在代码块里对齐。
-    Emoji通常占2个字符宽，但len()只算1个。
-    """
-    # 基础补位
-    return f"{text:<{length}}"
-
 def run_reddit_task():
+    # 这里调用上面定义的 get_apewisdom_data
     data = get_apewisdom_data()
     if not data:
         return
@@ -487,19 +505,15 @@ def run_reddit_task():
         mentions = item.get('mentions', 0)
         rank_24h = item.get('rank_24h_ago', 0)
         
-        # 1. 获取变动字符 (如 "🔺5" 或 "➖")
+        # 1. 获取变动字符
         change_raw = calculate_rank_change(rank, rank_24h)
         
-        # 2. 名字处理
+        # 2. 名字处理 (截断防止换行)
         name = name.replace("&amp;", "&").replace("\n", " ").strip()
         if len(name) > 8: name = name[:8] + "."
         
         # 3. 【核心黑科技】构建对齐头部
-        # 逻辑：我们将 "变动" + "排名" 放进同一个 ` ` 代码块中
-        # 格式：`➖    01.` 
-        # 使用 {:<5} 强行左对齐变动符号，留出空间
-        # 使用 {:02d} 强行让排名变成两位数 (01, 02, 30)，保证宽度一致
-        
+        # 格式：`➖    01.` (强行等宽)
         header_block = f"` {change_raw:<5} {rank:02d}. `"
         
         # 4. 拼接
@@ -522,12 +536,11 @@ def run_reddit_task():
     
     try:
         requests.post(WEBHOOK_URL, json=payload)
-        print("✅ ApeWisdom Top30 推送成功 (完美对齐版)")
+        print("✅ ApeWisdom Top30 推送成功 (排版修复版)")
     except Exception as e:
         print(f"❌ 推送失败: {e}")
         
     gc.collect()
-
 # ==========================================
 # 🚀 主程序
 # ==========================================
