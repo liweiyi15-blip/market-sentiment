@@ -432,91 +432,101 @@ def run_breadth_task():
         gc.collect()
 
 # ==========================================
-# 🔴 模块 3: Stocksera Reddit 热度榜 (新增)
+# 🔴 模块 3: Reddit 热度榜 (ApeWisdom 版 - 包含排名升降)
 # ==========================================
 
-def get_stocksera_reddit():
+def get_apewisdom_data():
     """
-    获取Stocksera的Reddit热度数据
+    使用 ApeWisdom API 获取 Reddit (WSB/Stocks) 热门股票
     """
-    print("📡 正在获取 Stocksera Reddit 数据...")
-    # Stocksera 官方接口 (获取24小时内的提及次数)
-    url = "https://stocksera.pythonanywhere.com/api/reddit_mentions"
+    print("📡 正在从 ApeWisdom 获取数据...")
+    # ApeWisdom 的公开接口，获取所有股票的第1页 (默认前100名)
+    url = "https://apewisdom.io/api/v1.0/filter/all-stocks/page/1"
     
     try:
-        # 添加 User-Agent 防止被拒
         headers = {
-            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36"
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
         }
         response = requests.get(url, headers=headers, timeout=20)
         
         if response.status_code == 200:
             data = response.json()
-            # Stocksera 返回的是整个列表，我们需要按提及次数(mentions)排序
-            # 格式通常是: [{'symbol': 'AAPL', 'name': 'Apple Inc.', 'mentions': 100, ...}, ...]
-            
-            # 过滤掉 mention 为 0 的
-            filtered_data = [d for d in data if d.get('mentions', 0) > 0]
-            
-            # 按 mentions 降序排列 (防万一API未排序)
-            sorted_data = sorted(filtered_data, key=lambda x: x.get('mentions', 0), reverse=True)
-            
-            # 取前20名
-            return sorted_data[:20]
+            # ApeWisdom 返回的是 {"results": [...], "count": ...}
+            results = data.get('results', [])
+            return results[:20] # 只取前20
         else:
-            print(f"⚠️ Stocksera API 返回错误: {response.status_code}")
+            print(f"⚠️ ApeWisdom API 错误: {response.status_code}")
             return None
     except Exception as e:
-        print(f"❌ 获取 Reddit 数据失败: {e}")
+        print(f"❌ 获取 ApeWisdom 数据失败: {e}")
         return None
 
+def calculate_rank_change(current_rank, old_rank):
+    """
+    计算排名变化并返回图标
+    """
+    if not old_rank or old_rank == 0:
+        return "🆕" # 新上榜
+    
+    diff = old_rank - current_rank
+    
+    if diff > 0:
+        return f"🔺{diff}" # 排名上升 (例如: 昨天10, 今天5 -> 上升5)
+    elif diff < 0:
+        return f"🔻{abs(diff)}" # 排名下降
+    else:
+        return "➖" # 排名不变
+
 def run_reddit_task():
-    data = get_stocksera_reddit()
+    data = get_apewisdom_data()
     if not data:
         return
 
     # 构建 Embed Description
-    # 格式: 1. $AAPL (Apple Inc.) - 提及: 123
     desc_lines = []
     
-    for i, item in enumerate(data):
-        rank = i + 1
-        symbol = item.get('symbol', 'Unknown')
+    for item in data:
+        # 提取字段
+        rank = item.get('rank', 0)
+        ticker = item.get('ticker', 'Unknown')
         name = item.get('name', '')
-        count = item.get('mentions', 0)
+        mentions = item.get('mentions', 0)
+        rank_24h = item.get('rank_24h_ago', 0)
         
-        # 简单的热度图标
-        fire = ""
-        if i < 3: fire = "🔥"
+        # 1. 排名变化图标
+        change_icon = calculate_rank_change(rank, rank_24h)
         
-        # 处理超长公司名，截断一下保持美观
-        if len(name) > 20:
-            name = name[:20] + "..."
-            
-        line = f"**{rank}. ${symbol}** ({name}) `{count}次` {fire}"
+        # 2. 火焰特效 (前3名)
+        fire = "🔥" if rank <= 3 else ""
+        
+        # 3. 名字太长截断
+        if len(name) > 15: name = name[:15] + ".."
+        
+        # 格式拼装: 
+        # 1. NVDA (NVIDIA..) 🔺2 提及:542 🔥
+        line = f"**{rank}. ${ticker}** ({name}) {change_icon} `{mentions}` {fire}"
         desc_lines.append(line)
 
     # 组合成 Embed
     payload = {
-        "username": REDDIT_BOT_NAME,
-        "avatar_url": REDDIT_BOT_AVATAR,
+        "username": "Reddit 舆情雷达", 
+        "avatar_url": "https://i.imgur.com/8Qj5X9A.png", # Reddit Logo
         "embeds": [{
-            "title": "🚀 Reddit 24H 热门股票榜 (Top 20)",
+            "title": "🦍 ApeWisdom 24H 热门榜",
             "description": "\n".join(desc_lines),
-            "color": 0xFF4500, # Reddit Orange
+            "color": 0x7289DA, # ApeWisdom 风格蓝紫色
             "footer": {
-                "text": f"数据来源: Stocksera | {datetime.now().strftime('%Y-%m-%d %H:%M')} ET\n注: 统计范围包括 r/wallstreetbets, r/stocks 等"
+                "text": f"数据来源: ApeWisdom.io | {datetime.now().strftime('%Y-%m-%d %H:%M')} ET\n🔺上升 🔻下降 ➖持平 🆕新进"
             }
         }]
     }
     
     try:
         requests.post(WEBHOOK_URL, json=payload)
-        print("✅ Reddit 热度榜已推送")
+        print("✅ ApeWisdom 热度榜已推送")
     except Exception as e:
-        print(f"❌ Reddit 推送失败: {e}")
+        print(f"❌ 推送失败: {e}")
         
-    # 垃圾回收
     gc.collect()
 
 # ==========================================
