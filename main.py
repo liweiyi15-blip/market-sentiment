@@ -22,46 +22,50 @@ from selenium import webdriver
 from selenium.webdriver.chrome.service import Service
 from selenium.webdriver.chrome.options import Options
 from selenium.webdriver.common.by import By
+
 # ==========================================
 # ⚙️ 全局配置区
 # ==========================================
 
 WEBHOOK_URL = os.getenv("WEBHOOK_URL") 
 
+# ------------------------------------------
 # ⏰ 时间表 (美东时间 ET)
-# 对应北京时间：
-# 冬令时: 21:31, 23:31, 04:01
-# 夏令时: 20:31, 22:31, 03:01
+# ------------------------------------------
+
+# 1. FedWatch (美联储观察) 时间点
 FED_SCHEDULE_TIMES = ["08:31", "10:31", "15:01"]
 
-# 市场广度时间 (美东 16:30)
+# 2. 市场广度 (Market Breadth) 时间点 (收盘后)
 BREADTH_SCHEDULE_TIME = "16:30"
 
-# ------------------------------------------
-# 🏛️ FedWatch 配置
-# ------------------------------------------
-# [开关] 控制 CME FedWatch Bot 是否运行
-# True = 开启 (会启动 Chromium 爬虫)
-# False = 关闭 (跳过执行，节省 Railway 资源)
-ENABLE_FED_BOT = False 
+# 3. Reddit 热度榜 时间点 (盘前)
+REDDIT_SCHEDULE_TIME = "08:55"
 
+# ------------------------------------------
+# 🤖 机器人信息配置
+# ------------------------------------------
+
+# FedWatch Bot
+ENABLE_FED_BOT = False  # 如果不需要跑Fed，保持False
 FED_BOT_NAME = "CME FedWatch Bot"
 FED_BOT_AVATAR = "https://i.imgur.com/d8KLt6Z.png"
 
-# ------------------------------------------
-# 📊 市场广度 配置
-# ------------------------------------------
+# 市场广度 Bot
 BREADTH_BOT_NAME = "标普500 广度日报" 
 BREADTH_BOT_AVATAR = "https://i.imgur.com/Segc5PF.jpeg"
 
+# Reddit 热度 Bot (新)
+REDDIT_BOT_NAME = "Stocksera 舆情热度"
+REDDIT_BOT_AVATAR = "https://i.imgur.com/8Qj5X9A.png" # 这里的头像可以使用Reddit Logo
+
 PREV_CUT_PROB = None
 
-# 【保底策略】万一爬虫死活抓不到日期，才用这个表
+# 【保底策略】万一爬虫抓不到日期/利率
 BACKUP_SCHEDULE = [
     "2025-12-10", "2026-01-28", "2026-03-18", "2026-05-06", 
     "2026-06-17", "2026-07-29", "2026-09-16", "2026-11-04", "2026-12-16"
 ]
-# 【保底策略】万一爬虫抓不到当前利率
 DEFAULT_BACKUP_RATE = 3.50 
 
 # ==========================================
@@ -69,32 +73,22 @@ DEFAULT_BACKUP_RATE = 3.50
 # ==========================================
 
 def parse_date_string(date_text):
-    """
-    尝试将网页上的各种日期文本 (e.g., 'Dec 10, 2025') 转化为 '2025-12-10'
-    """
     if not date_text: return None
     try:
-        # 清理文本，只保留字母数字和逗号
         clean_text = re.sub(r'[^\w\s,]', '', date_text).strip()
-        
-        # 常见格式 1: Dec 10, 2025
         try:
             dt = datetime.strptime(clean_text, "%b %d, %Y")
             return dt.strftime("%Y-%m-%d")
         except: pass
-        
-        # 常见格式 2: December 10, 2025
         try:
             dt = datetime.strptime(clean_text, "%B %d, %Y")
             return dt.strftime("%Y-%m-%d")
         except: pass
-
         return None
     except:
         return None
 
 def get_backup_meeting_date():
-    """从硬编码列表中找下一个日期（仅作为爬虫失败的备选）"""
     tz = pytz.timezone('US/Eastern')
     today_str = datetime.now(tz).strftime("%Y-%m-%d")
     for meeting_date in BACKUP_SCHEDULE:
@@ -103,9 +97,7 @@ def get_backup_meeting_date():
     return "TBD"
 
 def is_market_holiday(now_et):
-    # 周末判断 (5=周六, 6=周日)
     if now_et.weekday() >= 5: return True, "周末休市"
-    # 美股假期判断
     us_holidays = holidays.US(years=now_et.year) 
     if now_et.date() in us_holidays: return True, f"假期: {us_holidays.get(now_et.date())}"
     return False, None
@@ -118,7 +110,6 @@ def get_bar(p):
 def format_target_label(target_str, current_rate_base):
     try:
         lower_bound = float(target_str.split('-')[0].strip())
-        # 允许微小误差
         if abs(lower_bound - current_rate_base) <= 0.05:
             return f"{target_str} (维持)"
         elif lower_bound < current_rate_base:
@@ -129,60 +120,35 @@ def format_target_label(target_str, current_rate_base):
         return target_str
 
 # ==========================================
-# 🟢 模块 1: 降息概率 (全自动爬虫版)
+# 🟢 模块 1: 降息概率 (FedWatch)
 # ==========================================
 
 def scrape_header_info(driver, page_text):
-    """
-    尝试从页面抓取：
-    1. 当前利率 (Current Rate)
-    2. 下次会议日期 (Next Meeting Date)
-    """
     rate = None
     meeting_date = None
-
-    # --- 1. 抓取当前利率 ---
-    # 尝试正则匹配 "Current Rate: 4.25" 或 "Current Target Rate: 4.25-4.50"
-    # 我们只取区间的下限或单一数值
     try:
-        # 寻找类似于 "Current Rate 4.50" 的文本
         rate_match = re.search(r"Current.*?Rate.*?(\d+\.\d+)", page_text, re.IGNORECASE)
         if rate_match:
             val = float(rate_match.group(1))
-            # 过滤异常值
-            if 0.0 <= val <= 10.0:
-                rate = val
+            if 0.0 <= val <= 10.0: rate = val
     except: pass
 
-    # --- 2. 抓取会议日期 ---
-    # Investing.com 通常有个下拉框或者标题显示 Meeting Date
     try:
-        # 策略 A: 找含有 class="date" 或 id="meetingDate" 的元素
-        # 这是一个通用猜测，具体依赖页面结构
-        date_elements = driver.find_elements(By.XPATH, "//*[contains(@class, 'date') or contains(@id, 'date')]")
-        
-        # 策略 B: 直接搜寻月份单词 (Jan, Feb...) + 数字 + 年份
-        # 这是一种暴力但有效的方法
         months = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"]
         date_pattern = re.compile(r'(?:' + '|'.join(months) + r')\.?\s+\d{1,2},?\s+\d{4}', re.IGNORECASE)
-        
-        # 在页面前 2000 个字符里找日期（通常日期在顶部）
         top_text = page_text[:2000]
         dates_found = date_pattern.findall(top_text)
-        
         tz = pytz.timezone('US/Eastern')
         today = datetime.now(tz).date()
 
         for d_str in dates_found:
             parsed = parse_date_string(d_str)
             if parsed:
-                # 必须是未来或者今天的日期才算数
                 p_date = datetime.strptime(parsed, "%Y-%m-%d").date()
                 if p_date >= today:
                     meeting_date = parsed
-                    break # 找到了最近的一个未来日期
+                    break 
     except: pass
-
     return rate, meeting_date
 
 def get_fed_data():
@@ -201,13 +167,7 @@ def get_fed_data():
     options.add_argument("user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64)")
 
     driver = None
-    
-    # 最终结果容器
-    result = {
-        "current_base_rate": None,
-        "next_meeting": None,
-        "data": []
-    }
+    result = {"current_base_rate": None, "next_meeting": None, "data": []}
       
     try:
         service = Service("/usr/bin/chromedriver") 
@@ -216,28 +176,15 @@ def get_fed_data():
         driver.get("https://www.investing.com/central-banks/fed-rate-monitor")
         time.sleep(5) 
         
-        # 获取页面全文本用于分析
         page_text = driver.find_element(By.TAG_NAME, "body").text
-        
-        # 🧠 智能分析：抓取头部信息 (利率 + 日期)
         scraped_rate, scraped_date = scrape_header_info(driver, page_text)
         
-        if scraped_rate:
-            print(f"✅ 自动检测到当前利率: {scraped_rate}%")
-            result["current_base_rate"] = scraped_rate
-        else:
-            print(f"⚠️ 未检测到利率，使用保底值: {DEFAULT_BACKUP_RATE}%")
-            result["current_base_rate"] = DEFAULT_BACKUP_RATE
+        if scraped_rate: result["current_base_rate"] = scraped_rate
+        else: result["current_base_rate"] = DEFAULT_BACKUP_RATE
             
-        if scraped_date:
-            print(f"✅ 自动检测到下次会议: {scraped_date}")
-            result["next_meeting"] = scraped_date
-        else:
-            bk_date = get_backup_meeting_date()
-            print(f"⚠️ 未检测到日期，使用保底表: {bk_date}")
-            result["next_meeting"] = bk_date
+        if scraped_date: result["next_meeting"] = scraped_date
+        else: result["next_meeting"] = get_backup_meeting_date()
 
-        # --- 抓取概率表格 (原有逻辑) ---
         data_points = []
         try:
             tables = driver.find_elements(By.TAG_NAME, "table")
@@ -263,7 +210,6 @@ def get_fed_data():
         except: pass
 
         if not data_points: return None
-        
         result["data"] = data_points
         return result
 
@@ -282,7 +228,6 @@ def send_fed_embed(data):
     base_rate = data.get("current_base_rate")
     next_meeting_date = data.get("next_meeting")
     
-    # 1. 计算降息趋势
     current_cut_prob = 0.0
     target_cut_lower = base_rate - 0.25
     
@@ -292,7 +237,6 @@ def send_fed_embed(data):
     for item in data['data']:
         try:
             lower = float(item['target'].split('-')[0].strip())
-            # 找到降息 25bp 的那一项
             if abs(lower - target_cut_lower) <= 0.05:
                 cut_item = item
                 current_cut_prob = item['prob']
@@ -301,25 +245,17 @@ def send_fed_embed(data):
         except:
             rest_items.append(item)
     
-    # 计算变动
     delta = 0.0
     if PREV_CUT_PROB is not None:
         delta = current_cut_prob - PREV_CUT_PROB
     PREV_CUT_PROB = current_cut_prob
     
     trend_title = "📉 降息趋势变动"
-    if not cut_item and current_cut_prob == 0:
-        trend_text = "无降息预期"
-    elif delta > 0.1: 
-        trend_text = f"概率上升 +{delta:.1f}% 🔥"
-    elif delta < -0.1: 
-        trend_text = f"概率下降 {delta:.1f}% ❄️"
-    else:
-        trend_text = "稳定"
+    if not cut_item and current_cut_prob == 0: trend_text = "无降息预期"
+    elif delta > 0.1: trend_text = f"概率上升 +{delta:.1f}% 🔥"
+    elif delta < -0.1: trend_text = f"概率下降 {delta:.1f}% ❄️"
+    else: trend_text = "稳定"
 
-    # ==================================================
-    # 排序显示
-    # ==================================================
     display_list = []
     if cut_item: display_list.append(cut_item)
     if rest_items:
@@ -330,7 +266,6 @@ def send_fed_embed(data):
         data['data'].sort(key=lambda x: x['prob'], reverse=True)
         display_list = data['data'][:2]
 
-    # 华尔街共识
     all_sorted = sorted(data['data'], key=lambda x: x['prob'], reverse=True)
     top1_real = all_sorted[0]
     
@@ -339,8 +274,6 @@ def send_fed_embed(data):
     elif "(降息)" in label1_raw: consensus_short = "📉 降息 (Cut)"
     else: consensus_short = "📈 加息 (Hike)"
 
-    # 构建 Embed 
-    # 这里直接使用爬虫爬到的 next_meeting_date
     desc_lines = [f"**🗓️ 下次会议:** `{next_meeting_date}`\n"]
     
     for item in display_list:
@@ -358,21 +291,9 @@ def send_fed_embed(data):
             "description": "\n".join(desc_lines),
             "color": 0x3498DB,
             "fields": [
-                {
-                    "name": trend_title, 
-                    "value": trend_text, 
-                    "inline": True
-                },
-                {
-                    "name": "💡 华尔街共识", 
-                    "value": consensus_short, 
-                    "inline": True
-                },
-                {
-                    "name": "📊 当前基准利率", 
-                    "value": f"{base_rate}%", 
-                    "inline": False 
-                }
+                {"name": trend_title, "value": trend_text, "inline": True},
+                {"name": "💡 华尔街共识", "value": consensus_short, "inline": True},
+                {"name": "📊 当前基准利率", "value": f"{base_rate}%", "inline": False}
             ],
             "footer": {"text": f"Updated at {datetime.now().strftime('%H:%M')} ET | Auto-Scraped"}
         }]
@@ -381,64 +302,49 @@ def send_fed_embed(data):
     except Exception as e: print(f"❌ 推送失败: {e}")
 
 # ==========================================
-# 🔵 模块 2: 市场广度 (保持不变)
+# 🔵 模块 2: 市场广度 (Market Breadth)
 # ==========================================
-# === 粘贴这段新代码 ===
 def generate_breadth_chart(breadth_20_series, breadth_50_series):
     plt.style.use('dark_background')
     fig, ax = plt.subplots(figsize=(10, 5))
     
-    # 绘制折线
     ax.plot(breadth_20_series.index, breadth_20_series.values, color='#f1c40f', linewidth=2, label='Stocks > 20 Day SMA %')
     ax.plot(breadth_50_series.index, breadth_50_series.values, color='#e74c3c', linewidth=2, label='Stocks > 50 Day SMA %')
     ax.fill_between(breadth_20_series.index, breadth_20_series.values, alpha=0.1, color='#f1c40f')
     
-    # 绘制 80/20 警戒线
     ax.axhline(y=80, color='#ff5252', linestyle='--', linewidth=1, alpha=0.8)
     ax.text(breadth_20_series.index[0], 81, 'Overbought (80%)', color='#ff5252', fontsize=8)
     ax.axhline(y=20, color='#448aff', linestyle='--', linewidth=1, alpha=0.8)
     ax.text(breadth_20_series.index[0], 21, 'Oversold (20%)', color='#448aff', fontsize=8)
 
-    # --- 【修改点1】强制横轴从最左边的数据开始 ---
-    # left=... 设定了左边界，Right不设限让它自动适应
     ax.set_xlim(left=breadth_20_series.index[0], right=breadth_20_series.index[-1])
 
-    # --- 【修改点2】在图表上标注当前数值 ---
     last_date = breadth_20_series.index[-1]
     last_val_20 = breadth_20_series.iloc[-1]
     last_val_50 = breadth_50_series.iloc[-1]
 
-    # 给 20日线添加数值 (黄色)
     ax.annotate(f'{last_val_20:.1f}%', 
                 xy=(last_date, last_val_20), 
-                xytext=(-10, 10), textcoords='offset points', # 文字向左上方偏移一点，防止切断
+                xytext=(-10, 10), textcoords='offset points',
                 color='#f1c40f', fontsize=11, fontweight='bold', 
                 ha='right', bbox=dict(boxstyle="round,pad=0.3", fc="#2f3136", ec="#f1c40f", alpha=0.8))
 
-    # 给 50日线添加数值 (红色)
     ax.annotate(f'{last_val_50:.1f}%', 
                 xy=(last_date, last_val_50), 
-                xytext=(-10, -20), textcoords='offset points', # 文字向左下方偏移一点
+                xytext=(-10, -20), textcoords='offset points',
                 color='#e74c3c', fontsize=11, fontweight='bold', 
                 ha='right', bbox=dict(boxstyle="round,pad=0.3", fc="#2f3136", ec="#e74c3c", alpha=0.8))
-    # ----------------------------------------
 
     ax.set_title('S&P 500 Market Breadth (20 & 50 Day SMA)', fontsize=12, color='white', pad=15)
     ax.set_ylim(0, 100)
     ax.grid(True, linestyle=':', alpha=0.3)
     ax.xaxis.set_major_formatter(mdates.DateFormatter('%b %Y'))
     plt.xticks(rotation=0)
-    
-    # 图例
     ax.legend(loc='upper left', frameon=True, facecolor='#2f3136', edgecolor='#2f3136', labelcolor='white')
-    
-    # ... 上面的代码保持不变 ...
     
     buf = io.BytesIO()
     plt.savefig(buf, format='png', bbox_inches='tight', dpi=100, facecolor='#2b2d31')
     buf.seek(0)
-    
-    # ⚠️【优化点4】使用 close('all') 确保彻底关闭所有画板
     plt.close('all') 
     return buf
 
@@ -451,7 +357,6 @@ def get_market_sentiment(p):
 
 def run_breadth_task():
     print("📊 启动市场广度统计...")
-    # 定义变量名以便后续清理，防止报错
     data = None
     closes = None
     sma20_df = None
@@ -469,13 +374,10 @@ def run_breadth_task():
             tickers = ['AAPL', 'MSFT', 'NVDA', 'AMZN', 'GOOGL', 'META', 'TSLA', 'BRK-B', 'LLY', 'AVGO']
 
         warnings.simplefilter(action='ignore', category=FutureWarning)
-        # ... 上面的清理缓存代码 ...
         try:
             if os.path.exists('yfinance.cache'): shutil.rmtree('yfinance.cache')
         except: pass
 
-        # === 🟢 修改为下载 2 年数据 (period="2y") ===
-        # 这样前 50 天的计算死角就会被留在过去，只保留有效数据
         data = yf.download(tickers, period="2y", progress=False) 
         if 'Close' in data.columns: closes = data['Close']
         else: closes = data
@@ -513,7 +415,6 @@ def run_breadth_task():
         files = {'file': ('chart.png', chart_buffer, 'image/png')}
         requests.post(WEBHOOK_URL, data={'payload_json': json.dumps(payload_data)}, files=files)
         
-        # 关闭buffer，释放图片内存
         chart_buffer.close()
         print(f"✅ 广度报告已推送")
 
@@ -521,8 +422,6 @@ def run_breadth_task():
         print(f"❌ 广度任务异常: {e}")
     
     finally:
-        # ⚠️【优化点3】主动清理内存
-        # 无论成功还是失败，都强制删除大型数据变量
         print("🧹 正在清理内存...")
         try:
             del data
@@ -530,9 +429,95 @@ def run_breadth_task():
             del sma20_df
             del sma50_df
         except: pass
-        
-        # 强制运行垃圾回收，把内存归还给 Railway
         gc.collect()
+
+# ==========================================
+# 🔴 模块 3: Stocksera Reddit 热度榜 (新增)
+# ==========================================
+
+def get_stocksera_reddit():
+    """
+    获取Stocksera的Reddit热度数据
+    """
+    print("📡 正在获取 Stocksera Reddit 数据...")
+    # Stocksera 官方接口 (获取24小时内的提及次数)
+    url = "https://stocksera.pythonanywhere.com/api/reddit_mentions"
+    
+    try:
+        # 添加 User-Agent 防止被拒
+        headers = {
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36"
+        }
+        response = requests.get(url, headers=headers, timeout=20)
+        
+        if response.status_code == 200:
+            data = response.json()
+            # Stocksera 返回的是整个列表，我们需要按提及次数(mentions)排序
+            # 格式通常是: [{'symbol': 'AAPL', 'name': 'Apple Inc.', 'mentions': 100, ...}, ...]
+            
+            # 过滤掉 mention 为 0 的
+            filtered_data = [d for d in data if d.get('mentions', 0) > 0]
+            
+            # 按 mentions 降序排列 (防万一API未排序)
+            sorted_data = sorted(filtered_data, key=lambda x: x.get('mentions', 0), reverse=True)
+            
+            # 取前20名
+            return sorted_data[:20]
+        else:
+            print(f"⚠️ Stocksera API 返回错误: {response.status_code}")
+            return None
+    except Exception as e:
+        print(f"❌ 获取 Reddit 数据失败: {e}")
+        return None
+
+def run_reddit_task():
+    data = get_stocksera_reddit()
+    if not data:
+        return
+
+    # 构建 Embed Description
+    # 格式: 1. $AAPL (Apple Inc.) - 提及: 123
+    desc_lines = []
+    
+    for i, item in enumerate(data):
+        rank = i + 1
+        symbol = item.get('symbol', 'Unknown')
+        name = item.get('name', '')
+        count = item.get('mentions', 0)
+        
+        # 简单的热度图标
+        fire = ""
+        if i < 3: fire = "🔥"
+        
+        # 处理超长公司名，截断一下保持美观
+        if len(name) > 20:
+            name = name[:20] + "..."
+            
+        line = f"**{rank}. ${symbol}** ({name}) `{count}次` {fire}"
+        desc_lines.append(line)
+
+    # 组合成 Embed
+    payload = {
+        "username": REDDIT_BOT_NAME,
+        "avatar_url": REDDIT_BOT_AVATAR,
+        "embeds": [{
+            "title": "🚀 Reddit 24H 热门股票榜 (Top 20)",
+            "description": "\n".join(desc_lines),
+            "color": 0xFF4500, # Reddit Orange
+            "footer": {
+                "text": f"数据来源: Stocksera | {datetime.now().strftime('%Y-%m-%d %H:%M')} ET\n注: 统计范围包括 r/wallstreetbets, r/stocks 等"
+            }
+        }]
+    }
+    
+    try:
+        requests.post(WEBHOOK_URL, json=payload)
+        print("✅ Reddit 热度榜已推送")
+    except Exception as e:
+        print(f"❌ Reddit 推送失败: {e}")
+        
+    # 垃圾回收
+    gc.collect()
 
 # ==========================================
 # 🚀 主程序
@@ -540,50 +525,68 @@ def run_breadth_task():
 if __name__ == "__main__":
     print("🚀 监控服务已启动")
     
+    # --- 启动自检 (测试模式) ---
+    print("-------------- 系统自检 --------------")
+    
     if ENABLE_FED_BOT:
-        print("🧪 [测试] 正在发送 FedWatch (智能爬虫版)...")
+        print("🧪 [测试] FedWatch...")
         fed_data = get_fed_data()
-        if fed_data: 
-            send_fed_embed(fed_data)
-            print("✅ FedWatch 测试完成")
-        else:
-            print("⚠️ FedWatch 获取失败")
+        if fed_data: send_fed_embed(fed_data)
     else:
-        print("⏸️ [测试] FedWatch 已禁用，跳过测试")
+        print("⏸️ [测试] FedWatch 已禁用")
 
-    print("🧪 [测试] 正在发送 市场广度...")
+    print("🧪 [测试] 市场广度...")
     run_breadth_task()
     
-    print("✅ 所有测试结束，进入定时监听模式...")
+    print("🧪 [测试] Reddit 热度榜...")
+    run_reddit_task()
+    
+    print("✅ 自检结束，进入定时监听模式...")
+    print("--------------------------------------")
 
     last_run_time_str = ""
+    
     while True:
-        tz = pytz.timezone('US/Eastern')
-        now_et = datetime.now(tz)
-        current_str = now_et.strftime("%H:%M")
-        is_holiday, holiday_name = is_market_holiday(now_et)
+        try:
+            tz = pytz.timezone('US/Eastern')
+            now_et = datetime.now(tz)
+            current_str = now_et.strftime("%H:%M")
+            is_holiday, holiday_name = is_market_holiday(now_et)
 
-        if current_str != last_run_time_str:
-            print(f"⏰ {current_str} ET (Market Open: {not is_holiday})")
-            
-            # 只有在非假期/非周末时才推送
-            if not is_holiday:
-                if current_str in FED_SCHEDULE_TIMES:
-                    if ENABLE_FED_BOT:
-                        print(f"🔔 触发 FedWatch 定时推送: {current_str}")
-                        data = get_fed_data()
-                        if data: send_fed_embed(data)
-                    else:
-                        print(f"⏸️ 时间到达 {current_str}，但 FedWatch 已禁用，跳过执行")
+            if current_str != last_run_time_str:
+                print(f"⏰ {current_str} ET (Market Open: {not is_holiday})")
                 
-                if current_str == BREADTH_SCHEDULE_TIME:
-                    print(f"🔔 触发 市场广度 定时推送: {current_str}")
-                    run_breadth_task()
-            else:
-                # 假期/周末时，只打印心跳，不推送
-                if current_str in FED_SCHEDULE_TIMES or current_str == BREADTH_SCHEDULE_TIME:
-                    print(f"😴 今日休市 ({holiday_name})，跳过推送")
+                # 只有在非假期/非周末时才推送
+                if not is_holiday:
+                    # 1. FedWatch
+                    if current_str in FED_SCHEDULE_TIMES:
+                        if ENABLE_FED_BOT:
+                            print(f"🔔 触发 FedWatch: {current_str}")
+                            data = get_fed_data()
+                            if data: send_fed_embed(data)
+                        else:
+                            print(f"⏸️ 时间到，但 FedBot 禁用")
+                    
+                    # 2. Market Breadth
+                    if current_str == BREADTH_SCHEDULE_TIME:
+                        print(f"🔔 触发 市场广度: {current_str}")
+                        run_breadth_task()
+                        
+                    # 3. Reddit Trending (新增)
+                    if current_str == REDDIT_SCHEDULE_TIME:
+                        print(f"🔔 触发 Reddit 热度榜: {current_str}")
+                        run_reddit_task()
+                        
+                else:
+                    # 假期/周末时，只打印心跳
+                    all_times = FED_SCHEDULE_TIMES + [BREADTH_SCHEDULE_TIME, REDDIT_SCHEDULE_TIME]
+                    if current_str in all_times:
+                        print(f"😴 今日休市 ({holiday_name})，跳过推送")
 
-            last_run_time_str = current_str
+                last_run_time_str = current_str
         
+        except Exception as e:
+            print(f"⚠️ 主循环报错: {e}")
+            time.sleep(5)
+            
         time.sleep(30)
