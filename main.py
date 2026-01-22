@@ -439,7 +439,7 @@ def calculate_rank_change(current_rank, old_rank):
     计算排名变化并返回图标
     """
     if not old_rank or old_rank == 0:
-        return "🆕" # 新上榜
+        return "new" # 新上榜
     
     diff = old_rank - current_rank
     
@@ -451,59 +451,83 @@ def calculate_rank_change(current_rank, old_rank):
         return "➖" # 持平
 
 # ==========================================
-# 🔴 模块 3: Reddit 热度榜 (ApeWisdom 版 - 最终精简优化)
+# 🔴 模块 3: Reddit 热度榜 (TOP 30 + 日期标题)
 # ==========================================
+
+def get_apewisdom_data():
+    """
+    使用 ApeWisdom API 获取 Reddit (WSB/Stocks) 热门股票
+    """
+    print("📡 正在从 ApeWisdom 获取数据...")
+    url = "https://apewisdom.io/api/v1.0/filter/all-stocks/page/1"
+    
+    try:
+        headers = {
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+        }
+        response = requests.get(url, headers=headers, timeout=20)
+        
+        if response.status_code == 200:
+            data = response.json()
+            results = data.get('results', [])
+            return results[:30] # <--- 修改点：只取前30名
+        else:
+            print(f"⚠️ ApeWisdom API 错误: {response.status_code}")
+            return None
+    except Exception as e:
+        print(f"❌ 获取 ApeWisdom 数据失败: {e}")
+        return None
+
+def calculate_rank_change(current_rank, old_rank):
+    if not old_rank or old_rank == 0:
+        return "🆕"
+    diff = old_rank - current_rank
+    if diff > 0: return f"🔺{diff}"
+    elif diff < 0: return f"🔻{abs(diff)}"
+    else: return "➖"
 
 def run_reddit_task():
     data = get_apewisdom_data()
     if not data:
         return
 
-    # 构建 Embed Description
     desc_lines = []
     
     for item in data:
-        # 提取字段
         rank = item.get('rank', 0)
         ticker = item.get('ticker', 'Unknown')
         name = item.get('name', '')
         mentions = item.get('mentions', 0)
         rank_24h = item.get('rank_24h_ago', 0)
         
-        # 1. 排名变化图标 (放在最前面)
         change_icon = calculate_rank_change(rank, rank_24h)
-        
-        # 2. 火焰特效 (前3名)
         fire = "🔥" if rank <= 3 else ""
         
-        # 3. 名字截断 (缩短到10字符，防止手机端换行)
-        # 清理可能导致换行的 HTML 转义字符 (如 &amp;)
+        # 名字截断处理
         name = name.replace("&amp;", "&").replace("\n", " ").strip()
-        if len(name) > 10: 
-            name = name[:10] + ".."
+        if len(name) > 10: name = name[:10] + ".."
         
-        # 4. 格式拼装 (确保在一行)
         # 格式: ➖ 1. $SPY (SPDR S&P..), 提及324次 🔥
-        # 注意: change_icon 放在 rank 之前
         line = f"{change_icon} **{rank}. ${ticker}** ({name}), 提及{mentions}次 {fire}"
-        
         desc_lines.append(line)
 
-    # 组合成 Embed
+    # <--- 修改点：动态生成带日期的标题
+    # 获取当前日期，格式如：1月22日
+    date_str = datetime.now().strftime('%m月%d日') 
+    
     payload = {
         "username": "Reddit 舆情雷达", 
         "avatar_url": "https://i.imgur.com/8Qj5X9A.png", 
         "embeds": [{
-            "title": "🦍 ApeWisdom 24H 热门榜",
+            "title": f"Reddit 24H 热度榜（{date_str}）", # <--- 修改后的标题
             "description": "\n".join(desc_lines),
-            "color": 0x7289DA, # ApeWisdom 风格蓝紫色
-            # footer 已被彻底删除
+            "color": 0xFF4500, # 改回 Reddit 橙色，看起来更热烈
         }]
     }
     
     try:
         requests.post(WEBHOOK_URL, json=payload)
-        print("✅ ApeWisdom 热度榜已推送 (新格式)")
+        print("✅ ApeWisdom Top30 推送成功")
     except Exception as e:
         print(f"❌ 推送失败: {e}")
         
