@@ -451,40 +451,27 @@ def calculate_rank_change(current_rank, old_rank):
         return "➖" # 持平
 
 # ==========================================
-# 🔴 模块 3: Reddit 热度榜 (TOP 30 + 日期标题)
+# 🔴 模块 3: Reddit 热度榜 (最终完美对齐版)
 # ==========================================
 
-def get_apewisdom_data():
-    """
-    使用 ApeWisdom API 获取 Reddit (WSB/Stocks) 热门股票
-    """
-    print("📡 正在从 ApeWisdom 获取数据...")
-    url = "https://apewisdom.io/api/v1.0/filter/all-stocks/page/1"
-    
-    try:
-        headers = {
-            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
-        }
-        response = requests.get(url, headers=headers, timeout=20)
-        
-        if response.status_code == 200:
-            data = response.json()
-            results = data.get('results', [])
-            return results[:30] # <--- 修改点：只取前30名
-        else:
-            print(f"⚠️ ApeWisdom API 错误: {response.status_code}")
-            return None
-    except Exception as e:
-        print(f"❌ 获取 ApeWisdom 数据失败: {e}")
-        return None
-
+# 1. 辅助函数：计算变动 (返回纯文本，不带空格)
 def calculate_rank_change(current_rank, old_rank):
     if not old_rank or old_rank == 0:
         return "🆕"
+    
     diff = old_rank - current_rank
     if diff > 0: return f"🔺{diff}"
     elif diff < 0: return f"🔻{abs(diff)}"
     else: return "➖"
+
+# 2. 辅助函数：获取全角/半角混合字符串的显示宽度 (简单修正)
+def get_pad_text(text, length=6):
+    """
+    一个简单的补位函数，确保在代码块里对齐。
+    Emoji通常占2个字符宽，但len()只算1个。
+    """
+    # 基础补位
+    return f"{text:<{length}}"
 
 def run_reddit_task():
     data = get_apewisdom_data()
@@ -500,34 +487,42 @@ def run_reddit_task():
         mentions = item.get('mentions', 0)
         rank_24h = item.get('rank_24h_ago', 0)
         
-        change_icon = calculate_rank_change(rank, rank_24h)
-        fire = "🔥" if rank <= 3 else ""
+        # 1. 获取变动字符 (如 "🔺5" 或 "➖")
+        change_raw = calculate_rank_change(rank, rank_24h)
         
-        # 名字截断处理
+        # 2. 名字处理
         name = name.replace("&amp;", "&").replace("\n", " ").strip()
-        if len(name) > 10: name = name[:10] + ".."
+        if len(name) > 8: name = name[:8] + "."
         
-        # 格式: ➖ 1. $SPY (SPDR S&P..), 提及324次 🔥
-        line = f"{change_icon} **{rank}. ${ticker}** ({name}), 提及{mentions}次 {fire}"
+        # 3. 【核心黑科技】构建对齐头部
+        # 逻辑：我们将 "变动" + "排名" 放进同一个 ` ` 代码块中
+        # 格式：`➖    01.` 
+        # 使用 {:<5} 强行左对齐变动符号，留出空间
+        # 使用 {:02d} 强行让排名变成两位数 (01, 02, 30)，保证宽度一致
+        
+        header_block = f"` {change_raw:<5} {rank:02d}. `"
+        
+        # 4. 拼接
+        # 效果: `🔺5    02.` **$NVDA** (NVIDIA.) `提及 1024`
+        line = f"{header_block} **${ticker}** ({name}) `提及 {mentions}`"
+        
         desc_lines.append(line)
 
-    # <--- 修改点：动态生成带日期的标题
-    # 获取当前日期，格式如：1月22日
     date_str = datetime.now().strftime('%m月%d日') 
     
     payload = {
         "username": "Reddit 舆情雷达", 
         "avatar_url": "https://i.imgur.com/8Qj5X9A.png", 
         "embeds": [{
-            "title": f"Reddit 24H 热度榜（{date_str}）", # <--- 修改后的标题
+            "title": f"Reddit 24H 热度榜（{date_str}）",
             "description": "\n".join(desc_lines),
-            "color": 0xFF4500, # 改回 Reddit 橙色，看起来更热烈
+            "color": 0xFF4500, 
         }]
     }
     
     try:
         requests.post(WEBHOOK_URL, json=payload)
-        print("✅ ApeWisdom Top30 推送成功")
+        print("✅ ApeWisdom Top30 推送成功 (完美对齐版)")
     except Exception as e:
         print(f"❌ 推送失败: {e}")
         
