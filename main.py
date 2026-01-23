@@ -40,7 +40,7 @@ FED_SCHEDULE_TIMES = ["08:31", "10:31", "15:01"]
 BREADTH_SCHEDULE_TIME = "16:30"
 
 # 3. Reddit 热度榜 时间点 (盘前)
-REDDIT_SCHEDULE_TIME = "08:55"
+REDDIT_SCHEDULE_TIME = "16:42"
 
 # ------------------------------------------
 # 🤖 机器人信息配置
