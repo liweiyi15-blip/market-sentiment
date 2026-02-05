@@ -356,13 +356,17 @@ def get_market_sentiment(p):
     return "🍃 **稳定**"     
 
 def run_breadth_task():
-    print("📊 启动市场广度统计...")
-    data = None
-    closes = None
-    sma20_df = None
-    sma50_df = None
+    print("📊 启动市场广度统计 (极速省钱版)...")
+    
+    # 结果累加器
+    total_above_20 = None
+    total_above_50 = None
+    total_stocks_count = None
+    
+    chart_buffer = None
     
     try:
+        # 1. 获取标普500列表
         try:
             url = 'https://en.wikipedia.org/wiki/List_of_S%26P_500_companies'
             headers = {'User-Agent': 'Mozilla/5.0'}
@@ -371,34 +375,107 @@ def run_breadth_task():
             df_tickers = next((df for df in tables if 'Symbol' in df.columns), None)
             tickers = [t.replace('.', '-') for t in df_tickers['Symbol'].tolist()] 
         except:
+            print("⚠️ 无法获取完整列表，使用备选名单")
             tickers = ['AAPL', 'MSFT', 'NVDA', 'AMZN', 'GOOGL', 'META', 'TSLA', 'BRK-B', 'LLY', 'AVGO']
 
+        # 2. 清理缓存 (防止磁盘占用)
         warnings.simplefilter(action='ignore', category=FutureWarning)
         try:
             if os.path.exists('yfinance.cache'): shutil.rmtree('yfinance.cache')
         except: pass
 
-        data = yf.download(tickers, period="2y", progress=False) 
-        if 'Close' in data.columns: closes = data['Close']
-        else: closes = data
-        sma20_df = closes.rolling(window=20).mean()
-        sma50_df = closes.rolling(window=50).mean()
+        # ==========================================
+        # ⚠️【省钱核心】扩大批次 + 极速瘦身
+        # ==========================================
+        # 批次扩大到 100 (因为我们只保留 Close 列，内存完全够用)
+        # 批次越大，网络请求次数越少，运行时间越短 = 省钱
+        batch_size = 100 
+        total_batches = (len(tickers) + batch_size - 1) // batch_size
         
-        daily_breadth_20 = ((closes > sma20_df).sum(axis=1) / closes.notna().sum(axis=1)) * 100
-        daily_breadth_50 = ((closes > sma50_df).sum(axis=1) / closes.notna().sum(axis=1)) * 100
+        print(f"📦 共有 {len(tickers)} 只股票，分为 {total_batches} 批加速处理...")
+
+        for i in range(0, len(tickers), batch_size):
+            batch_tickers = tickers[i:i + batch_size]
+            print(f"   🚀 正在处理第 {i//batch_size + 1}/{total_batches} 批 (Top: {batch_tickers[0]})...")
+            
+            try:
+                # auto_adjust=True 会直接下载调整后的收盘价，减少数据列
+                # threads=True 开启多线程加速下载 (减少运行时间)
+                df_batch = yf.download(batch_tickers, period="2y", auto_adjust=True, threads=True, progress=False)
+                
+                # 🛠️ 极速瘦身步骤：
+                # 1. 如果下载了多列 (Open, High...), 只保留 Close
+                if isinstance(df_batch.columns, pd.MultiIndex):
+                    # 尝试寻找 Close 或 Adj Close
+                    try:
+                        closes = df_batch['Close']
+                    except KeyError:
+                        try: closes = df_batch['Adj Close']
+                        except: closes = df_batch
+                elif 'Close' in df_batch.columns:
+                    closes = df_batch['Close']
+                else:
+                    closes = df_batch
+
+                # 2. ⚠️ 强制转换为 float32 (关键省内存步骤)
+                # 默认是 float64，改用 float32 精度足够画图，内存减半
+                closes = closes.astype('float32')
+
+                # 计算逻辑
+                sma20 = closes.rolling(window=20).mean()
+                sma50 = closes.rolling(window=50).mean()
+                
+                is_above_20 = (closes > sma20)
+                is_above_50 = (closes > sma50)
+                is_valid = closes.notna() 
+                
+                batch_sum_20 = is_above_20.sum(axis=1)
+                batch_sum_50 = is_above_50.sum(axis=1)
+                batch_count = is_valid.sum(axis=1)
+                
+                # 累加
+                if total_above_20 is None:
+                    total_above_20 = batch_sum_20
+                    total_above_50 = batch_sum_50
+                    total_stocks_count = batch_count
+                else:
+                    total_above_20 = total_above_20.add(batch_sum_20, fill_value=0)
+                    total_above_50 = total_above_50.add(batch_sum_50, fill_value=0)
+                    total_stocks_count = total_stocks_count.add(batch_count, fill_value=0)
+
+            except Exception as e:
+                print(f"⚠️ 批次跳过: {e}")
+            
+            # 立即销毁，腾出空间给下一批
+            del df_batch
+            try: del closes; del sma20; del sma50
+            except: pass
+            gc.collect() 
+            
+        # ==========================================
+        # 3. 计算最终百分比
+        # ==========================================
+        print("🧮 合并计算中...")
+        total_stocks_count = total_stocks_count.replace(0, 1) 
         
+        daily_breadth_20 = (total_above_20 / total_stocks_count) * 100
+        daily_breadth_50 = (total_above_50 / total_stocks_count) * 100
+
+        # 4. 生成图表 (取最近1年 252个交易日)
         chart_buffer = generate_breadth_chart(daily_breadth_20.tail(252), daily_breadth_50.tail(252))
+        
         current_p20 = daily_breadth_20.iloc[-1]
         current_p50 = daily_breadth_50.iloc[-1]
         
         sentiment_20 = get_market_sentiment(current_p20)
         sentiment_50 = get_market_sentiment(current_p50)
 
+        # 5. 推送
         payload_data = {
             "username": BREADTH_BOT_NAME,
             "avatar_url": BREADTH_BOT_AVATAR,
             "embeds": [{
-                "title": "S&P 500 市场广度",
+                "title": "S&P 500 市场广度 (1年走势)",
                 "description": f"**日期:** `{datetime.now().strftime('%Y-%m-%d')}`\n\n"
                                f"**股价 > 20日均线:** **{current_p20:.1f}%**\n"
                                f"{sentiment_20}\n\n"
@@ -414,20 +491,19 @@ def run_breadth_task():
         
         files = {'file': ('chart.png', chart_buffer, 'image/png')}
         requests.post(WEBHOOK_URL, data={'payload_json': json.dumps(payload_data)}, files=files)
-        
-        chart_buffer.close()
         print(f"✅ 广度报告已推送")
 
     except Exception as e:
         print(f"❌ 广度任务异常: {e}")
+        import traceback
+        traceback.print_exc()
     
     finally:
-        print("🧹 正在清理内存...")
-        try:
-            del data
-            del closes
-            del sma20_df
-            del sma50_df
+        print("🧹 最终清理...")
+        if chart_buffer:
+            try: chart_buffer.close()
+            except: pass
+        try: del total_above_20; del total_above_50; del daily_breadth_20;
         except: pass
         gc.collect()
 
