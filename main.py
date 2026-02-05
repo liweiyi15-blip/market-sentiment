@@ -356,7 +356,7 @@ def get_market_sentiment(p):
     return "🍃 **稳定**"     
 
 def run_breadth_task():
-    print("📊 启动市场广度统计 (极速省钱版)...")
+    print("📊 启动市场广度统计 (极速省钱+对齐修复版)...")
     
     # 结果累加器
     total_above_20 = None
@@ -378,38 +378,28 @@ def run_breadth_task():
             print("⚠️ 无法获取完整列表，使用备选名单")
             tickers = ['AAPL', 'MSFT', 'NVDA', 'AMZN', 'GOOGL', 'META', 'TSLA', 'BRK-B', 'LLY', 'AVGO']
 
-        # 2. 清理缓存 (防止磁盘占用)
         warnings.simplefilter(action='ignore', category=FutureWarning)
         try:
             if os.path.exists('yfinance.cache'): shutil.rmtree('yfinance.cache')
         except: pass
 
-        # ==========================================
-        # ⚠️【省钱核心】扩大批次 + 极速瘦身
-        # ==========================================
-        # 批次扩大到 100 (因为我们只保留 Close 列，内存完全够用)
-        # 批次越大，网络请求次数越少，运行时间越短 = 省钱
+        # 批次处理
         batch_size = 100 
         total_batches = (len(tickers) + batch_size - 1) // batch_size
-        
-        print(f"📦 共有 {len(tickers)} 只股票，分为 {total_batches} 批加速处理...")
+        print(f"📦 共有 {len(tickers)} 只股票，分为 {total_batches} 批处理...")
 
         for i in range(0, len(tickers), batch_size):
             batch_tickers = tickers[i:i + batch_size]
-            print(f"   🚀 正在处理第 {i//batch_size + 1}/{total_batches} 批 (Top: {batch_tickers[0]})...")
+            print(f"   🚀 处理第 {i//batch_size + 1}/{total_batches} 批...")
             
             try:
-                # auto_adjust=True 会直接下载调整后的收盘价，减少数据列
-                # threads=True 开启多线程加速下载 (减少运行时间)
+                # auto_adjust=True, threads=True
                 df_batch = yf.download(batch_tickers, period="2y", auto_adjust=True, threads=True, progress=False)
                 
-                # 🛠️ 极速瘦身步骤：
-                # 1. 如果下载了多列 (Open, High...), 只保留 Close
+                # 🛠️ 数据清洗与对齐
                 if isinstance(df_batch.columns, pd.MultiIndex):
-                    # 尝试寻找 Close 或 Adj Close
-                    try:
-                        closes = df_batch['Close']
-                    except KeyError:
+                    try: closes = df_batch['Close']
+                    except KeyError: 
                         try: closes = df_batch['Adj Close']
                         except: closes = df_batch
                 elif 'Close' in df_batch.columns:
@@ -417,11 +407,10 @@ def run_breadth_task():
                 else:
                     closes = df_batch
 
-                # 2. ⚠️ 强制转换为 float32 (关键省内存步骤)
-                # 默认是 float64，改用 float32 精度足够画图，内存减半
+                # 强制 float32
                 closes = closes.astype('float32')
 
-                # 计算逻辑
+                # 计算均线
                 sma20 = closes.rolling(window=20).mean()
                 sma50 = closes.rolling(window=50).mean()
                 
@@ -429,16 +418,25 @@ def run_breadth_task():
                 is_above_50 = (closes > sma50)
                 is_valid = closes.notna() 
                 
+                # ⚠️ 【关键修复】确保索引是 DatetimeIndex 并且时区一致
+                # 有些时候 yfinance 返回的索引可能带时区，也可能不带，导致相加报错
+                if closes.index.tz is not None:
+                    # 统一移除时区信息，只保留日期
+                    is_above_20.index = is_above_20.index.tz_localize(None)
+                    is_above_50.index = is_above_50.index.tz_localize(None)
+                    is_valid.index = is_valid.index.tz_localize(None)
+
                 batch_sum_20 = is_above_20.sum(axis=1)
                 batch_sum_50 = is_above_50.sum(axis=1)
                 batch_count = is_valid.sum(axis=1)
                 
-                # 累加
+                # 累加 (使用 add 自动对齐日期)
                 if total_above_20 is None:
                     total_above_20 = batch_sum_20
                     total_above_50 = batch_sum_50
                     total_stocks_count = batch_count
                 else:
+                    # fill_value=0 非常重要，防止日期错位产生 NaN
                     total_above_20 = total_above_20.add(batch_sum_20, fill_value=0)
                     total_above_50 = total_above_50.add(batch_sum_50, fill_value=0)
                     total_stocks_count = total_stocks_count.add(batch_count, fill_value=0)
@@ -446,22 +444,24 @@ def run_breadth_task():
             except Exception as e:
                 print(f"⚠️ 批次跳过: {e}")
             
-            # 立即销毁，腾出空间给下一批
+            # 内存清理
             del df_batch
             try: del closes; del sma20; del sma50
             except: pass
             gc.collect() 
             
-        # ==========================================
         # 3. 计算最终百分比
-        # ==========================================
         print("🧮 合并计算中...")
         total_stocks_count = total_stocks_count.replace(0, 1) 
         
         daily_breadth_20 = (total_above_20 / total_stocks_count) * 100
         daily_breadth_50 = (total_above_50 / total_stocks_count) * 100
 
-        # 4. 生成图表 (取最近1年 252个交易日)
+        # 排序索引，防止画图连线混乱
+        daily_breadth_20 = daily_breadth_20.sort_index()
+        daily_breadth_50 = daily_breadth_50.sort_index()
+
+        # 4. 生成图表
         chart_buffer = generate_breadth_chart(daily_breadth_20.tail(252), daily_breadth_50.tail(252))
         
         current_p20 = daily_breadth_20.iloc[-1]
@@ -475,16 +475,16 @@ def run_breadth_task():
             "username": BREADTH_BOT_NAME,
             "avatar_url": BREADTH_BOT_AVATAR,
             "embeds": [{
-                "title": "S&P 500 市场广度 (1年走势)",
-                "description": f"**日期:** `{datetime.now().strftime('%Y-%m-%d')}`\n\n"
-                               f"**股价 > 20日均线:** **{current_p20:.1f}%**\n"
+                "title": "S&P 500 Market Breadth", # 标题改英文防止乱码
+                "description": f"**Date:** `{datetime.now().strftime('%Y-%m-%d')}`\n\n"
+                               f"**Stocks > SMA20:** **{current_p20:.1f}%**\n"
                                f"{sentiment_20}\n\n"
-                               f"**股价 > 50日均线:** **{current_p50:.1f}%**\n"
+                               f"**Stocks > SMA50:** **{current_p50:.1f}%**\n"
                                f"{sentiment_50}",
                 "color": 0xF1C40F,
                 "image": {"url": "attachment://chart.png"},
                 "footer": {
-                    "text": f"💡 标普500大于20日、50日均的数量\n💡 >80% 警惕回调，<20% 孕育反弹。\n（统计样本: {len(tickers)}只成分股）"
+                    "text": f"S&P 500 stocks above 20/50 day moving average.\n(Sample size: {len(tickers)})"
                 }
             }]
         }
