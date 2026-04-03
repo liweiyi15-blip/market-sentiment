@@ -636,15 +636,17 @@ def run_fear_greed_task():
     try:
         fg = fear_and_greed.get()
         current_value = round(fg.value, 1)
-        stage_desc = fg.description
+        
+        # 💡 修复点：将API获取的描述强制转为小写并去除空格，确保100%命中翻译
+        stage_desc = str(fg.description).strip().lower()
 
-        # 翻译阶段描述
+        # 翻译阶段描述 (字典键值全部改为小写)
         stage_map = {
-            "Extreme Greed": "极度贪婪",
-            "Greed": "贪婪",
-            "Neutral": "中性",
-            "Fear": "恐慌",
-            "Extreme Fear": "极度恐慌"
+            "extreme greed": "极度贪婪",
+            "greed": "贪婪",
+            "neutral": "中性",
+            "fear": "恐慌",
+            "extreme fear": "极度恐慌"
         }
         stage_cn = stage_map.get(stage_desc, stage_desc)
 
