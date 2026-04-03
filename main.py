@@ -10,6 +10,7 @@ import json
 import warnings
 import re
 import shutil 
+import fear_and_greed
 import matplotlib
 # ⚠️【优化点1】强制使用非交互式后端，大幅节省内存
 matplotlib.use('Agg') 
@@ -42,6 +43,9 @@ BREADTH_SCHEDULE_TIME = "16:30"
 # 3. Reddit 热度榜 时间点 (盘前)
 REDDIT_SCHEDULE_TIME = "16:42"
 
+# 4. CNN恐慌贪婪指数 时间点 (美东盘中开盘时段每小时)
+FEAR_SCHEDULE_TIMES = ["09:30", "10:30", "11:30", "12:30", "13:30", "14:30", "15:30"]
+
 # ------------------------------------------
 # 🤖 机器人信息配置
 # ------------------------------------------
@@ -58,6 +62,11 @@ BREADTH_BOT_AVATAR = "https://i.imgur.com/Segc5PF.jpeg"
 # Reddit 热度 Bot (新)
 REDDIT_BOT_NAME = "Stocksera 舆情热度"
 REDDIT_BOT_AVATAR = "https://i.imgur.com/8Qj5X9A.png" # 这里的头像可以使用Reddit Logo
+
+# Fear & Greed Bot (新)
+FEAR_BOT_NAME = "CNN 恐慌贪婪指数"
+FEAR_BOT_AVATAR = "https://i.imgur.com/K3Vw8Y7.png" 
+PREV_FEAR_VALUE = None
 
 PREV_CUT_PROB = None
 
@@ -94,7 +103,7 @@ def get_backup_meeting_date():
     for meeting_date in BACKUP_SCHEDULE:
         if meeting_date >= today_str:
             return meeting_date
-    return "TBD"
+        return "TBD"
 
 def is_market_holiday(now_et):
     if now_et.weekday() >= 5: return True, "周末休市"
@@ -353,7 +362,7 @@ def get_market_sentiment(p):
     if p > 60: return "🔥 **火热**"      
     if p < 20: return "❄️❄️ **深度寒冷**"
     if p < 40: return "❄️ **寒冷**"      
-    return "🍃 **稳定**"     
+    return "🍃 **稳定**"      
 
 def run_breadth_task():
     print("📊 启动市场广度统计 (极速省钱+对齐修复版)...")
@@ -554,7 +563,7 @@ def get_apewisdom_data():
         print(f"❌ 获取 ApeWisdom 数据失败: {e}")
         return None
 
-def calculate_rank_change(current_rank, old_rank):
+def calculate_rank_change_reddit(current_rank, old_rank):
     """
     计算排名变化图标
     """
@@ -582,7 +591,7 @@ def run_reddit_task():
         rank_24h = item.get('rank_24h_ago', 0)
         
         # 2. 获取变动字符
-        change_raw = calculate_rank_change(rank, rank_24h)
+        change_raw = calculate_rank_change_reddit(rank, rank_24h)
         
         # 3. 名字处理
         name = name.replace("&amp;", "&").replace("\n", " ").strip()
@@ -616,6 +625,62 @@ def run_reddit_task():
         print(f"❌ 推送失败: {e}")
         
     gc.collect()
+
+# ==========================================
+# 🟠 模块 4: CNN 恐慌贪婪指数
+# ==========================================
+def run_fear_greed_task():
+    global PREV_FEAR_VALUE
+    print("📊 启动恐慌贪婪指数抓取...")
+
+    try:
+        fg = fear_and_greed.get()
+        current_value = round(fg.value, 1)
+        stage_desc = fg.description
+
+        # 翻译阶段描述
+        stage_map = {
+            "Extreme Greed": "极度贪婪",
+            "Greed": "贪婪",
+            "Neutral": "中性",
+            "Fear": "恐慌",
+            "Extreme Fear": "极度恐慌"
+        }
+        stage_cn = stage_map.get(stage_desc, stage_desc)
+
+        # 计算并格式化变动 (使用文本箭头，无emoji)
+        change_text = "初始化 (无对比数据)"
+        if PREV_FEAR_VALUE is not None:
+            diff = current_value - PREV_FEAR_VALUE
+            if diff > 0:
+                change_text = f"→ 升高了 {diff:.1f}"
+            elif diff < 0:
+                change_text = f"→ 降低了 {abs(diff):.1f}"
+            else:
+                change_text = "→ 保持不变"
+
+        # 更新上一次的数据记录
+        PREV_FEAR_VALUE = current_value
+
+        # 构建Embed排版 (纯文本排版，无图表)
+        payload = {
+            "username": FEAR_BOT_NAME,
+            "avatar_url": FEAR_BOT_AVATAR,
+            "embeds": [{
+                "title": "CNN 市场情绪监测",
+                "description": f"**当前情绪:** {stage_cn}\n"
+                               f"**当前数值:** `{current_value}`\n"
+                               f"**环比上小时:** {change_text}",
+                "color": 0x9B59B6
+            }]
+        }
+
+        requests.post(WEBHOOK_URL, json=payload)
+        print("✅ 恐慌贪婪指数推送成功")
+
+    except Exception as e:
+        print(f"❌ 获取恐慌贪婪指数失败: {e}")
+
 # ==========================================
 # 🚀 主程序
 # ==========================================
@@ -637,6 +702,9 @@ if __name__ == "__main__":
     
     print("🧪 [测试] Reddit 热度榜...")
     run_reddit_task()
+    
+    print("🧪 [测试] 恐慌贪婪指数...")
+    run_fear_greed_task()
     
     print("✅ 自检结束，进入定时监听模式...")
     print("--------------------------------------")
@@ -669,14 +737,19 @@ if __name__ == "__main__":
                         print(f"🔔 触发 市场广度: {current_str}")
                         run_breadth_task()
                         
-                    # 3. Reddit Trending (新增)
+                    # 3. Reddit Trending
                     if current_str == REDDIT_SCHEDULE_TIME:
                         print(f"🔔 触发 Reddit 热度榜: {current_str}")
                         run_reddit_task()
                         
+                    # 4. CNN Fear & Greed (新增)
+                    if current_str in FEAR_SCHEDULE_TIMES:
+                        print(f"🔔 触发 恐慌贪婪指数: {current_str}")
+                        run_fear_greed_task()
+                        
                 else:
                     # 假期/周末时，只打印心跳
-                    all_times = FED_SCHEDULE_TIMES + [BREADTH_SCHEDULE_TIME, REDDIT_SCHEDULE_TIME]
+                    all_times = FED_SCHEDULE_TIMES + [BREADTH_SCHEDULE_TIME, REDDIT_SCHEDULE_TIME] + FEAR_SCHEDULE_TIMES
                     if current_str in all_times:
                         print(f"😴 今日休市 ({holiday_name})，跳过推送")
 
