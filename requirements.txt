@@ -6,3 +6,4 @@ yfinance
 pandas
 lxml
 matplotlib
+fear-and-greed
