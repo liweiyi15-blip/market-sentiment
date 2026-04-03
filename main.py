@@ -65,7 +65,7 @@ REDDIT_BOT_AVATAR = "https://i.imgur.com/8Qj5X9A.png" # 这里的头像可以使
 
 # Fear & Greed Bot (新)
 FEAR_BOT_NAME = "CNN 恐慌贪婪指数"
-FEAR_BOT_AVATAR = "https://i.imgur.com/K3Vw8Y7.png" 
+FEAR_BOT_AVATAR = "https://i.imgur.com/Segc5PF.jpeg" 
 PREV_FEAR_VALUE = None
 
 PREV_CUT_PROB = None
@@ -637,16 +637,16 @@ def run_fear_greed_task():
         fg = fear_and_greed.get()
         current_value = round(fg.value, 1)
         
-        # 💡 修复点：将API获取的描述强制转为小写并去除空格，确保100%命中翻译
+        # 将API获取的描述强制转为小写并去除空格
         stage_desc = str(fg.description).strip().lower()
 
-        # 翻译阶段描述 (字典键值全部改为小写)
+        # 翻译阶段描述，并加上官方的数值区间
         stage_map = {
-            "extreme greed": "极度贪婪",
-            "greed": "贪婪",
-            "neutral": "中性",
-            "fear": "恐慌",
-            "extreme fear": "极度恐慌"
+            "extreme greed": "极度贪婪 (76-100)",
+            "greed": "贪婪 (56-75)",
+            "neutral": "中性 (45-55)",
+            "fear": "恐慌 (25-44)",
+            "extreme fear": "极度恐慌 (0-24)"
         }
         stage_cn = stage_map.get(stage_desc, stage_desc)
 
