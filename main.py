@@ -357,13 +357,6 @@ def generate_breadth_chart(breadth_20_series, breadth_50_series):
     plt.close('all') 
     return buf
 
-def get_market_sentiment(p):
-    if p > 80: return "🔥🔥 **深度火热**"
-    if p > 60: return "🔥 **火热**"      
-    if p < 20: return "❄️❄️ **深度寒冷**"
-    if p < 40: return "❄️ **寒冷**"      
-    return "🍃 **稳定**"      
-
 def run_breadth_task():
     print("📊 启动市场广度统计 (极速省钱+对齐修复版)...")
     
@@ -472,29 +465,16 @@ def run_breadth_task():
 
         # 4. 生成图表
         chart_buffer = generate_breadth_chart(daily_breadth_20.tail(252), daily_breadth_50.tail(252))
-        
-        current_p20 = daily_breadth_20.iloc[-1]
-        current_p50 = daily_breadth_50.iloc[-1]
-        
-        sentiment_20 = get_market_sentiment(current_p20)
-        sentiment_50 = get_market_sentiment(current_p50)
 
         # 5. 推送
         payload_data = {
             "username": BREADTH_BOT_NAME,
             "avatar_url": BREADTH_BOT_AVATAR,
             "embeds": [{
-                "title": "S&P 500 Market Breadth", # 标题改英文防止乱码
-                "description": f"**Date:** `{datetime.now().strftime('%Y-%m-%d')}`\n\n"
-                               f"**Stocks > SMA20:** **{current_p20:.1f}%**\n"
-                               f"{sentiment_20}\n\n"
-                               f"**Stocks > SMA50:** **{current_p50:.1f}%**\n"
-                               f"{sentiment_50}",
+                "title": "S&P 500 Market Breadth",
+                "description": f"**Date:** `{datetime.now().strftime('%Y-%m-%d')}`",
                 "color": 0xF1C40F,
-                "image": {"url": "attachment://chart.png"},
-                "footer": {
-                    "text": f"S&P 500 stocks above 20/50 day moving average.\n(Sample size: {len(tickers)})"
-                }
+                "image": {"url": "attachment://chart.png"}
             }]
         }
         
