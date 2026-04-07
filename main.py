@@ -19,10 +19,6 @@ import matplotlib.dates as mdates
 # ⚠️【优化点2】引入垃圾回收机制
 import gc 
 from datetime import datetime, timedelta
-from selenium import webdriver
-from selenium.webdriver.chrome.service import Service
-from selenium.webdriver.chrome.options import Options
-from selenium.webdriver.common.by import By
 
 # ==========================================
 # ⚙️ 全局配置区
@@ -34,76 +30,35 @@ WEBHOOK_URL = os.getenv("WEBHOOK_URL")
 # ⏰ 时间表 (美东时间 ET)
 # ------------------------------------------
 
-# 1. FedWatch (美联储观察) 时间点
-FED_SCHEDULE_TIMES = ["08:31", "10:31", "15:01"]
-
-# 2. 市场广度 (Market Breadth) 时间点 (收盘后)
+# 1. 市场广度 (Market Breadth) 时间点 (收盘后)
 BREADTH_SCHEDULE_TIME = "16:30"
 
-# 3. Reddit 热度榜 时间点 (盘前)
+# 2. Reddit 热度榜 时间点 (盘前)
 REDDIT_SCHEDULE_TIME = "16:42"
 
-# 4. CNN恐慌贪婪指数 时间点 (美东盘中开盘时段每小时)
-FEAR_SCHEDULE_TIMES = ["09:30", "10:30", "11:30", "12:30", "13:30", "14:30", "15:30"]
+# 3. CNN恐慌贪婪指数 时间点 (美东盘中开盘时段每2小时)
+FEAR_SCHEDULE_TIMES = ["09:30", "11:30", "13:30", "15:30"]
 
 # ------------------------------------------
 # 🤖 机器人信息配置
 # ------------------------------------------
 
-# FedWatch Bot
-ENABLE_FED_BOT = False  # 如果不需要跑Fed，保持False
-FED_BOT_NAME = "CME FedWatch Bot"
-FED_BOT_AVATAR = "https://i.imgur.com/d8KLt6Z.png"
-
 # 市场广度 Bot
 BREADTH_BOT_NAME = "标普500 广度日报" 
 BREADTH_BOT_AVATAR = "https://i.imgur.com/Segc5PF.jpeg"
 
-# Reddit 热度 Bot (新)
+# Reddit 热度 Bot
 REDDIT_BOT_NAME = "Stocksera 舆情热度"
-REDDIT_BOT_AVATAR = "https://i.imgur.com/8Qj5X9A.png" # 这里的头像可以使用Reddit Logo
+REDDIT_BOT_AVATAR = "https://i.imgur.com/8Qj5X9A.png"
 
-# Fear & Greed Bot (新)
+# Fear & Greed Bot
 FEAR_BOT_NAME = "CNN 恐慌贪婪指数"
 FEAR_BOT_AVATAR = "https://i.imgur.com/Segc5PF.jpeg" 
 PREV_FEAR_VALUE = None
 
-PREV_CUT_PROB = None
-
-# 【保底策略】万一爬虫抓不到日期/利率
-BACKUP_SCHEDULE = [
-    "2025-12-10", "2026-01-28", "2026-03-18", "2026-05-06", 
-    "2026-06-17", "2026-07-29", "2026-09-16", "2026-11-04", "2026-12-16"
-]
-DEFAULT_BACKUP_RATE = 3.50 
-
 # ==========================================
 # 🛠️ 辅助函数
 # ==========================================
-
-def parse_date_string(date_text):
-    if not date_text: return None
-    try:
-        clean_text = re.sub(r'[^\w\s,]', '', date_text).strip()
-        try:
-            dt = datetime.strptime(clean_text, "%b %d, %Y")
-            return dt.strftime("%Y-%m-%d")
-        except: pass
-        try:
-            dt = datetime.strptime(clean_text, "%B %d, %Y")
-            return dt.strftime("%Y-%m-%d")
-        except: pass
-        return None
-    except:
-        return None
-
-def get_backup_meeting_date():
-    tz = pytz.timezone('US/Eastern')
-    today_str = datetime.now(tz).strftime("%Y-%m-%d")
-    for meeting_date in BACKUP_SCHEDULE:
-        if meeting_date >= today_str:
-            return meeting_date
-        return "TBD"
 
 def is_market_holiday(now_et):
     if now_et.weekday() >= 5: return True, "周末休市"
@@ -111,207 +66,8 @@ def is_market_holiday(now_et):
     if now_et.date() in us_holidays: return True, f"假期: {us_holidays.get(now_et.date())}"
     return False, None
 
-def get_bar(p):
-    length = 15
-    filled = int(p / 100 * length)
-    return "█" * filled + "░" * (length - filled)
-
-def format_target_label(target_str, current_rate_base):
-    try:
-        lower_bound = float(target_str.split('-')[0].strip())
-        if abs(lower_bound - current_rate_base) <= 0.05:
-            return f"{target_str} (维持)"
-        elif lower_bound < current_rate_base:
-            return f"{target_str} (降息)"
-        else:
-            return f"{target_str} (加息)"
-    except:
-        return target_str
-
 # ==========================================
-# 🟢 模块 1: 降息概率 (FedWatch)
-# ==========================================
-
-def scrape_header_info(driver, page_text):
-    rate = None
-    meeting_date = None
-    try:
-        rate_match = re.search(r"Current.*?Rate.*?(\d+\.\d+)", page_text, re.IGNORECASE)
-        if rate_match:
-            val = float(rate_match.group(1))
-            if 0.0 <= val <= 10.0: rate = val
-    except: pass
-
-    try:
-        months = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"]
-        date_pattern = re.compile(r'(?:' + '|'.join(months) + r')\.?\s+\d{1,2},?\s+\d{4}', re.IGNORECASE)
-        top_text = page_text[:2000]
-        dates_found = date_pattern.findall(top_text)
-        tz = pytz.timezone('US/Eastern')
-        today = datetime.now(tz).date()
-
-        for d_str in dates_found:
-            parsed = parse_date_string(d_str)
-            if parsed:
-                p_date = datetime.strptime(parsed, "%Y-%m-%d").date()
-                if p_date >= today:
-                    meeting_date = parsed
-                    break 
-    except: pass
-    return rate, meeting_date
-
-def get_fed_data():
-    if not ENABLE_FED_BOT:
-        print("⏸️ [系统] FedWatch Bot 已禁用，跳过抓取...")
-        return None
-
-    print(f"⚡ 启动 Chromium...")
-    options = Options()
-    options.binary_location = "/usr/bin/chromium" 
-    options.add_argument("--headless=new") 
-    options.add_argument("--no-sandbox")
-    options.add_argument("--disable-dev-shm-usage")
-    options.add_argument("--disable-gpu")
-    options.add_argument("--disable-blink-features=AutomationControlled")
-    options.add_argument("user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64)")
-
-    driver = None
-    result = {"current_base_rate": None, "next_meeting": None, "data": []}
-      
-    try:
-        service = Service("/usr/bin/chromedriver") 
-        driver = webdriver.Chrome(service=service, options=options)
-        driver.set_page_load_timeout(60)
-        driver.get("https://www.investing.com/central-banks/fed-rate-monitor")
-        time.sleep(5) 
-        
-        page_text = driver.find_element(By.TAG_NAME, "body").text
-        scraped_rate, scraped_date = scrape_header_info(driver, page_text)
-        
-        if scraped_rate: result["current_base_rate"] = scraped_rate
-        else: result["current_base_rate"] = DEFAULT_BACKUP_RATE
-            
-        if scraped_date: result["next_meeting"] = scraped_date
-        else: result["next_meeting"] = get_backup_meeting_date()
-
-        data_points = []
-        try:
-            tables = driver.find_elements(By.TAG_NAME, "table")
-            target_table = None
-            for tbl in tables:
-                if "%" in tbl.text and len(tbl.find_elements(By.TAG_NAME, "tr")) < 15:
-                    target_table = tbl
-                    break
-            if not target_table and tables: target_table = tables[0]
-
-            if target_table:
-                rows = target_table.find_elements(By.TAG_NAME, "tr")
-                for row in rows:
-                    cols = row.find_elements(By.TAG_NAME, "td")
-                    if len(cols) >= 2:
-                        txt0, txt1 = cols[0].text.strip(), cols[1].text.strip()
-                        try:
-                            if "%" in txt0: prob, target = float(txt0.replace("%", "")), txt1
-                            elif "%" in txt1: prob, target = float(txt1.replace("%", "")), txt0
-                            else: continue
-                            data_points.append({"prob": prob, "target": target})
-                        except: continue
-        except: pass
-
-        if not data_points: return None
-        result["data"] = data_points
-        return result
-
-    except Exception as e:
-        print(f"❌ Error: {e}")
-        return None
-    finally:
-        if driver:
-            try: driver.quit()
-            except: pass
-
-def send_fed_embed(data):
-    global PREV_CUT_PROB
-    if not data or not data['data']: return
-    
-    base_rate = data.get("current_base_rate")
-    next_meeting_date = data.get("next_meeting")
-    
-    current_cut_prob = 0.0
-    target_cut_lower = base_rate - 0.25
-    
-    cut_item = None
-    rest_items = []
-    
-    for item in data['data']:
-        try:
-            lower = float(item['target'].split('-')[0].strip())
-            if abs(lower - target_cut_lower) <= 0.05:
-                cut_item = item
-                current_cut_prob = item['prob']
-            else:
-                rest_items.append(item)
-        except:
-            rest_items.append(item)
-    
-    delta = 0.0
-    if PREV_CUT_PROB is not None:
-        delta = current_cut_prob - PREV_CUT_PROB
-    PREV_CUT_PROB = current_cut_prob
-    
-    trend_title = "📉 降息趋势变动"
-    if not cut_item and current_cut_prob == 0: trend_text = "无降息预期"
-    elif delta > 0.1: trend_text = f"概率上升 +{delta:.1f}% 🔥"
-    elif delta < -0.1: trend_text = f"概率下降 {delta:.1f}% ❄️"
-    else: trend_text = "稳定"
-
-    display_list = []
-    if cut_item: display_list.append(cut_item)
-    if rest_items:
-        rest_items.sort(key=lambda x: x['prob'], reverse=True)
-        display_list.append(rest_items[0])
-    
-    if not display_list:
-        data['data'].sort(key=lambda x: x['prob'], reverse=True)
-        display_list = data['data'][:2]
-
-    all_sorted = sorted(data['data'], key=lambda x: x['prob'], reverse=True)
-    top1_real = all_sorted[0]
-    
-    label1_raw = format_target_label(top1_real['target'], base_rate)
-    if "(维持)" in label1_raw: consensus_short = "⏸️ 维持利率 (Hold)"
-    elif "(降息)" in label1_raw: consensus_short = "📉 降息 (Cut)"
-    else: consensus_short = "📈 加息 (Hike)"
-
-    desc_lines = [f"**🗓️ 下次会议:** `{next_meeting_date}`\n"]
-    
-    for item in display_list:
-        label = format_target_label(item['target'], base_rate)
-        desc_lines.append(f"**目标: {label}**")
-        desc_lines.append(f"`{get_bar(item['prob'])}` **{item['prob']}%**\n")
-    
-    desc_lines.append("\n------------------------")
-
-    payload = {
-        "username": FED_BOT_NAME,
-        "avatar_url": FED_BOT_AVATAR,
-        "embeds": [{
-            "title": "🏛️ CME FedWatch™",
-            "description": "\n".join(desc_lines),
-            "color": 0x3498DB,
-            "fields": [
-                {"name": trend_title, "value": trend_text, "inline": True},
-                {"name": "💡 华尔街共识", "value": consensus_short, "inline": True},
-                {"name": "📊 当前基准利率", "value": f"{base_rate}%", "inline": False}
-            ],
-            "footer": {"text": f"Updated at {datetime.now().strftime('%H:%M')} ET | Auto-Scraped"}
-        }]
-    }
-    try: requests.post(WEBHOOK_URL, json=payload)
-    except Exception as e: print(f"❌ 推送失败: {e}")
-
-# ==========================================
-# 🔵 模块 2: 市场广度 (Market Breadth)
+# 🔵 模块 1: 市场广度 (Market Breadth)
 # ==========================================
 def generate_breadth_chart(breadth_20_series, breadth_50_series):
     plt.style.use('dark_background')
@@ -421,9 +177,7 @@ def run_breadth_task():
                 is_valid = closes.notna() 
                 
                 # ⚠️ 【关键修复】确保索引是 DatetimeIndex 并且时区一致
-                # 有些时候 yfinance 返回的索引可能带时区，也可能不带，导致相加报错
                 if closes.index.tz is not None:
-                    # 统一移除时区信息，只保留日期
                     is_above_20.index = is_above_20.index.tz_localize(None)
                     is_above_50.index = is_above_50.index.tz_localize(None)
                     is_valid.index = is_valid.index.tz_localize(None)
@@ -438,7 +192,6 @@ def run_breadth_task():
                     total_above_50 = batch_sum_50
                     total_stocks_count = batch_count
                 else:
-                    # fill_value=0 非常重要，防止日期错位产生 NaN
                     total_above_20 = total_above_20.add(batch_sum_20, fill_value=0)
                     total_above_50 = total_above_50.add(batch_sum_50, fill_value=0)
                     total_stocks_count = total_stocks_count.add(batch_count, fill_value=0)
@@ -466,13 +219,29 @@ def run_breadth_task():
         # 4. 生成图表
         chart_buffer = generate_breadth_chart(daily_breadth_20.tail(252), daily_breadth_50.tail(252))
 
-        # 5. 推送
+        # 5. 计算昨日对比与推送文案
+        last_val_20 = daily_breadth_20.iloc[-1]
+        prev_val_20 = daily_breadth_20.iloc[-2] if len(daily_breadth_20) > 1 else last_val_20
+        diff_20 = last_val_20 - prev_val_20
+        trend_20 = f"升高 {abs(diff_20):.1f}%" if diff_20 >= 0 else f"降低 {abs(diff_20):.1f}%"
+
+        last_val_50 = daily_breadth_50.iloc[-1]
+        prev_val_50 = daily_breadth_50.iloc[-2] if len(daily_breadth_50) > 1 else last_val_50
+        diff_50 = last_val_50 - prev_val_50
+        trend_50 = f"升高 {abs(diff_50):.1f}%" if diff_50 >= 0 else f"降低 {abs(diff_50):.1f}%"
+
+        desc_text = (
+            f"**日期:** `{datetime.now().strftime('%Y-%m-%d')}`\n\n"
+            f"**20日参与度:** `{last_val_20:.1f}%` (比昨日{trend_20})\n"
+            f"**50日参与度:** `{last_val_50:.1f}%` (比昨日{trend_50})"
+        )
+
         payload_data = {
             "username": BREADTH_BOT_NAME,
             "avatar_url": BREADTH_BOT_AVATAR,
             "embeds": [{
-                "title": "S&P 500 Market Breadth",
-                "description": f"**Date:** `{datetime.now().strftime('%Y-%m-%d')}`",
+                "title": "标普500 市场参与度日报",
+                "description": desc_text,
                 "color": 0xF1C40F,
                 "image": {"url": "attachment://chart.png"}
             }]
@@ -516,7 +285,7 @@ def calculate_rank_change(current_rank, old_rank):
         return "➖" # 持平
 
 # ==========================================
-# 🔴 模块 3: Reddit 热度榜 (完整修复+完美对齐版)
+# 🔴 模块 2: Reddit 热度榜 (完整修复+完美对齐版)
 # ==========================================
 
 def get_apewisdom_data():
@@ -580,8 +349,7 @@ def run_reddit_task():
         # 4. 头部排版 (保持黑底以维持对齐)
         header_block = f"` {change_raw:<5} {rank:02d}. `"
         
-        # 5. 拼接 (修改点：只给 mentions 数字加了反引号 ` `)
-        # 效果: `🔺5    02.` **$NVDA** (NVIDIA.) 提及 `1024`次
+        # 5. 拼接
         line = f"{header_block} **${ticker}** ({name}) 提及 `{mentions}`次"
         
         desc_lines.append(line)
@@ -607,7 +375,7 @@ def run_reddit_task():
     gc.collect()
 
 # ==========================================
-# 🟠 模块 4: CNN 恐慌贪婪指数
+# 🟠 模块 3: CNN 恐慌贪婪指数
 # ==========================================
 def run_fear_greed_task():
     global PREV_FEAR_VALUE
@@ -652,7 +420,7 @@ def run_fear_greed_task():
                 "title": "CNN 市场情绪监测",
                 "description": f"**当前情绪:** {stage_cn}\n"
                                f"**当前数值:** `{current_value}`\n"
-                               f"**环比上小时:** {change_text}",
+                               f"**环比上一期:** {change_text}",
                 "color": 0x9B59B6
             }]
         }
@@ -671,13 +439,6 @@ if __name__ == "__main__":
     
     # --- 启动自检 (测试模式) ---
     print("-------------- 系统自检 --------------")
-    
-    if ENABLE_FED_BOT:
-        print("🧪 [测试] FedWatch...")
-        fed_data = get_fed_data()
-        if fed_data: send_fed_embed(fed_data)
-    else:
-        print("⏸️ [测试] FedWatch 已禁用")
 
     print("🧪 [测试] 市场广度...")
     run_breadth_task()
@@ -705,33 +466,24 @@ if __name__ == "__main__":
                 
                 # 只有在非假期/非周末时才推送
                 if not is_holiday:
-                    # 1. FedWatch
-                    if current_str in FED_SCHEDULE_TIMES:
-                        if ENABLE_FED_BOT:
-                            print(f"🔔 触发 FedWatch: {current_str}")
-                            data = get_fed_data()
-                            if data: send_fed_embed(data)
-                        else:
-                            print(f"⏸️ 时间到，但 FedBot 禁用")
-                    
-                    # 2. Market Breadth
+                    # 1. Market Breadth
                     if current_str == BREADTH_SCHEDULE_TIME:
                         print(f"🔔 触发 市场广度: {current_str}")
                         run_breadth_task()
                         
-                    # 3. Reddit Trending
+                    # 2. Reddit Trending
                     if current_str == REDDIT_SCHEDULE_TIME:
                         print(f"🔔 触发 Reddit 热度榜: {current_str}")
                         run_reddit_task()
                         
-                    # 4. CNN Fear & Greed (新增)
+                    # 3. CNN Fear & Greed
                     if current_str in FEAR_SCHEDULE_TIMES:
                         print(f"🔔 触发 恐慌贪婪指数: {current_str}")
                         run_fear_greed_task()
                         
                 else:
                     # 假期/周末时，只打印心跳
-                    all_times = FED_SCHEDULE_TIMES + [BREADTH_SCHEDULE_TIME, REDDIT_SCHEDULE_TIME] + FEAR_SCHEDULE_TIMES
+                    all_times = [BREADTH_SCHEDULE_TIME, REDDIT_SCHEDULE_TIME] + FEAR_SCHEDULE_TIMES
                     if current_str in all_times:
                         print(f"😴 今日休市 ({holiday_name})，跳过推送")
 
