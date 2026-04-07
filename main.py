@@ -230,17 +230,24 @@ def run_breadth_task():
         diff_50 = last_val_50 - prev_val_50
         trend_50 = f"升高 {abs(diff_50):.1f}%" if diff_50 >= 0 else f"降低 {abs(diff_50):.1f}%"
 
+        # 获取美东时间并转换为中文星期
+        tz = pytz.timezone('US/Eastern')
+        now_et = datetime.now(tz)
+        weekdays = ["周一", "周二", "周三", "周四", "周五", "周六", "周日"]
+        date_str = f"{now_et.month}月{now_et.day}日{weekdays[now_et.weekday()]}"
+
+        # 描述文本（去掉了单独的日期行）
         desc_text = (
-            f"**日期:** `{datetime.now().strftime('%Y-%m-%d')}`\n\n"
             f"**20日参与度:** `{last_val_20:.1f}%` (比昨日{trend_20})\n"
             f"**50日参与度:** `{last_val_50:.1f}%` (比昨日{trend_50})"
         )
 
+        # 组合到标题中
         payload_data = {
             "username": BREADTH_BOT_NAME,
             "avatar_url": BREADTH_BOT_AVATAR,
             "embeds": [{
-                "title": "标普500 市场参与度日报",
+                "title": f"市场参与度（{date_str}）",
                 "description": desc_text,
                 "color": 0xF1C40F,
                 "image": {"url": "attachment://chart.png"}
