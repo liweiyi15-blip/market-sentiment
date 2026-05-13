@@ -20,29 +20,11 @@ import matplotlib.dates as mdates
 import gc 
 from datetime import datetime, timedelta
 
-# ---------- 新增依赖 ----------
-import discord
-from discord.ext import commands, tasks
-import google.generativeai as genai
-from bs4 import BeautifulSoup
-import asyncio
-# ------------------------------
-
 # ==========================================
 # ⚙️ 全局配置区
 # ==========================================
 
 WEBHOOK_URL = os.getenv("WEBHOOK_URL") 
-DISCORD_TOKEN = os.getenv("DISCORD_BOT_TOKEN")  # 新增：Discord Bot Token
-GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")    # 新增：Gemini API Key
-
-if GEMINI_API_KEY:
-    genai.configure(api_key=GEMINI_API_KEY)
-
-# 新增：频道ID配置
-SOURCE_CH_ID = 1468226877159379070
-SUMMARY_CH_ID = 1504129510226923542
-RAW_LINK_CH_ID = 1436730809749864652
 
 # ------------------------------------------
 # ⏰ 时间表 (美东时间 ET)
@@ -134,12 +116,15 @@ def generate_breadth_chart(breadth_20_series, breadth_50_series):
 def run_breadth_task():
     print("📊 启动市场广度统计 (极速省钱+对齐修复版)...")
     
+    # 结果累加器
     total_above_20 = None
     total_above_50 = None
     total_stocks_count = None
+    
     chart_buffer = None
     
     try:
+        # 1. 获取标普500列表
         try:
             url = 'https://en.wikipedia.org/wiki/List_of_S%26P_500_companies'
             headers = {'User-Agent': 'Mozilla/5.0'}
@@ -156,6 +141,7 @@ def run_breadth_task():
             if os.path.exists('yfinance.cache'): shutil.rmtree('yfinance.cache')
         except: pass
 
+        # 批次处理
         batch_size = 100 
         total_batches = (len(tickers) + batch_size - 1) // batch_size
         print(f"📦 共有 {len(tickers)} 只股票，分为 {total_batches} 批处理...")
@@ -165,8 +151,10 @@ def run_breadth_task():
             print(f"   🚀 处理第 {i//batch_size + 1}/{total_batches} 批...")
             
             try:
+                # auto_adjust=True, threads=True
                 df_batch = yf.download(batch_tickers, period="2y", auto_adjust=True, threads=True, progress=False)
                 
+                # 🛠️ 数据清洗与对齐
                 if isinstance(df_batch.columns, pd.MultiIndex):
                     try: closes = df_batch['Close']
                     except KeyError: 
@@ -177,8 +165,10 @@ def run_breadth_task():
                 else:
                     closes = df_batch
 
+                # 强制 float32
                 closes = closes.astype('float32')
 
+                # 计算均线
                 sma20 = closes.rolling(window=20).mean()
                 sma50 = closes.rolling(window=50).mean()
                 
@@ -186,6 +176,7 @@ def run_breadth_task():
                 is_above_50 = (closes > sma50)
                 is_valid = closes.notna() 
                 
+                # ⚠️ 【关键修复】确保索引是 DatetimeIndex 并且时区一致
                 if closes.index.tz is not None:
                     is_above_20.index = is_above_20.index.tz_localize(None)
                     is_above_50.index = is_above_50.index.tz_localize(None)
@@ -195,6 +186,7 @@ def run_breadth_task():
                 batch_sum_50 = is_above_50.sum(axis=1)
                 batch_count = is_valid.sum(axis=1)
                 
+                # 累加 (使用 add 自动对齐日期)
                 if total_above_20 is None:
                     total_above_20 = batch_sum_20
                     total_above_50 = batch_sum_50
@@ -207,22 +199,27 @@ def run_breadth_task():
             except Exception as e:
                 print(f"⚠️ 批次跳过: {e}")
             
+            # 内存清理
             del df_batch
             try: del closes; del sma20; del sma50
             except: pass
             gc.collect() 
             
+        # 3. 计算最终百分比
         print("🧮 合并计算中...")
         total_stocks_count = total_stocks_count.replace(0, 1) 
         
         daily_breadth_20 = (total_above_20 / total_stocks_count) * 100
         daily_breadth_50 = (total_above_50 / total_stocks_count) * 100
 
+        # 排序索引，防止画图连线混乱
         daily_breadth_20 = daily_breadth_20.sort_index()
         daily_breadth_50 = daily_breadth_50.sort_index()
 
+        # 4. 生成图表
         chart_buffer = generate_breadth_chart(daily_breadth_20.tail(252), daily_breadth_50.tail(252))
 
+        # 5. 计算昨日对比与推送文案
         last_val_20 = daily_breadth_20.iloc[-1]
         prev_val_20 = daily_breadth_20.iloc[-2] if len(daily_breadth_20) > 1 else last_val_20
         diff_20 = last_val_20 - prev_val_20
@@ -233,16 +230,19 @@ def run_breadth_task():
         diff_50 = last_val_50 - prev_val_50
         trend_50 = f"升高 {abs(diff_50):.1f}%" if diff_50 >= 0 else f"降低 {abs(diff_50):.1f}%"
 
+        # 获取美东时间并转换为中文星期
         tz = pytz.timezone('US/Eastern')
         now_et = datetime.now(tz)
         weekdays = ["周一", "周二", "周三", "周四", "周五", "周六", "周日"]
         date_str = f"{now_et.month}月{now_et.day}日{weekdays[now_et.weekday()]}"
 
+        # 描述文本（去掉了单独的日期行）
         desc_text = (
             f"**20日参与度:** `{last_val_20:.1f}%` (比昨日{trend_20})\n"
             f"**50日参与度:** `{last_val_50:.1f}%` (比昨日{trend_50})"
         )
 
+        # 组合到标题中
         payload_data = {
             "username": BREADTH_BOT_NAME,
             "avatar_url": BREADTH_BOT_AVATAR,
@@ -276,27 +276,42 @@ def run_breadth_task():
 # 🛠️ 辅助函数: 计算排名变化
 # ==========================================
 def calculate_rank_change(current_rank, old_rank):
-    if not old_rank or old_rank == 0: return "new"
+    """
+    计算排名变化并返回图标
+    """
+    if not old_rank or old_rank == 0:
+        return "new" # 新上榜
+    
     diff = old_rank - current_rank
-    if diff > 0: return f"🔺{diff}"
-    elif diff < 0: return f"🔻{abs(diff)}"
-    else: return "➖"
+    
+    if diff > 0:
+        return f"🔺{diff}" # 排名上升
+    elif diff < 0:
+        return f"🔻{abs(diff)}" # 排名下降
+    else:
+        return "➖" # 持平
 
 # ==========================================
 # 🔴 模块 2: Reddit 热度榜 (完整修复+完美对齐版)
 # ==========================================
 
 def get_apewisdom_data():
+    """
+    使用 ApeWisdom API 获取 Reddit (WSB/Stocks) 热门股票
+    """
     print("📡 正在从 ApeWisdom 获取数据...")
     url = "https://apewisdom.io/api/v1.0/filter/all-stocks/page/1"
+    
     try:
         headers = {
             "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
         }
         response = requests.get(url, headers=headers, timeout=20)
+        
         if response.status_code == 200:
             data = response.json()
-            return data.get('results', [])[:30]
+            results = data.get('results', [])
+            return results[:30] # Top 30
         else:
             print(f"⚠️ ApeWisdom API 错误: {response.status_code}")
             return None
@@ -305,17 +320,25 @@ def get_apewisdom_data():
         return None
 
 def calculate_rank_change_reddit(current_rank, old_rank):
-    if not old_rank or old_rank == 0: return "🆕"
+    """
+    计算排名变化图标
+    """
+    if not old_rank or old_rank == 0:
+        return "🆕"
+    
     diff = old_rank - current_rank
     if diff > 0: return f"🔺{diff}"
     elif diff < 0: return f"🔻{abs(diff)}"
     else: return "➖"
 
 def run_reddit_task():
+    # 1. 获取数据
     data = get_apewisdom_data()
-    if not data: return
+    if not data:
+        return
 
     desc_lines = []
+    
     for item in data:
         rank = item.get('rank', 0)
         ticker = item.get('ticker', 'Unknown')
@@ -323,15 +346,23 @@ def run_reddit_task():
         mentions = item.get('mentions', 0)
         rank_24h = item.get('rank_24h_ago', 0)
         
+        # 2. 获取变动字符
         change_raw = calculate_rank_change_reddit(rank, rank_24h)
+        
+        # 3. 名字处理
         name = name.replace("&amp;", "&").replace("\n", " ").strip()
         if len(name) > 8: name = name[:8] + "."
         
+        # 4. 头部排版 (保持黑底以维持对齐)
         header_block = f"` {change_raw:<5} {rank:02d}. `"
+        
+        # 5. 拼接
         line = f"{header_block} **${ticker}** ({name}) 提及 `{mentions}`次"
+        
         desc_lines.append(line)
 
     date_str = datetime.now().strftime('%m月%d日') 
+    
     payload = {
         "username": "散户买什么？", 
         "avatar_url": "https://i.imgur.com/iXlOzKP.png", 
@@ -360,8 +391,11 @@ def run_fear_greed_task():
     try:
         fg = fear_and_greed.get()
         current_value = round(fg.value, 1)
+        
+        # 将API获取的描述强制转为小写并去除空格
         stage_desc = str(fg.description).strip().lower()
 
+        # 翻译阶段描述，并加上官方的数值区间
         stage_map = {
             "extreme greed": "极度贪婪 (76-100)",
             "greed": "贪婪 (56-75)",
@@ -371,15 +405,21 @@ def run_fear_greed_task():
         }
         stage_cn = stage_map.get(stage_desc, stage_desc)
 
+        # 计算并格式化变动 (使用文本箭头，无emoji)
         change_text = "初始化 (无对比数据)"
         if PREV_FEAR_VALUE is not None:
             diff = current_value - PREV_FEAR_VALUE
-            if diff > 0: change_text = f"→ 升高了 {diff:.1f}"
-            elif diff < 0: change_text = f"→ 降低了 {abs(diff):.1f}"
-            else: change_text = "→ 保持不变"
+            if diff > 0:
+                change_text = f"→ 升高了 {diff:.1f}"
+            elif diff < 0:
+                change_text = f"→ 降低了 {abs(diff):.1f}"
+            else:
+                change_text = "→ 保持不变"
 
+        # 更新上一次的数据记录
         PREV_FEAR_VALUE = current_value
 
+        # 构建Embed排版 (纯文本排版，无图表)
         payload = {
             "username": FEAR_BOT_NAME,
             "avatar_url": FEAR_BOT_AVATAR,
@@ -399,150 +439,65 @@ def run_fear_greed_task():
         print(f"❌ 获取恐慌贪婪指数失败: {e}")
 
 # ==========================================
-# 🚀 新增模块: Discord 机器人与期权大单监控
+# 🚀 主程序
 # ==========================================
-
-intents = discord.Intents.default()
-intents.message_content = True
-bot = commands.Bot(command_prefix='/', intents=intents)
-
-async def process_option_message(message: discord.Message) -> bool:
-    """处理捕获的期权大单消息"""
-    text_to_check = message.content
-    if message.embeds:
-        for embed in message.embeds:
-            if embed.title: text_to_check += f" {embed.title}"
-            if embed.description: text_to_check += f" {embed.description}"
-
-    # 兼容多种常见的符号输入
-    if "期权大单" not in text_to_check:
-        return False
-
-    # 提取URL
-    urls = re.findall(r'http[s]?://[^\s<>"]+|www\.[^\s<>"]+', text_to_check)
-    if not urls: 
-        return False
-    target_url = urls[0]
-
-    # 爬取并请求Gemini提取摘要
-    try:
-        resp = await asyncio.to_thread(requests.get, target_url, headers={'User-Agent': 'Mozilla/5.0'}, timeout=10)
-        soup = BeautifulSoup(resp.text, 'html.parser')
-        article_text = soup.get_text(separator='\n', strip=True)[:3000] # 截断防止超出Token
-        
-        if not GEMINI_API_KEY:
-            summary = "⚠️ 缺失 Gemini API Key"
-        else:
-            model = genai.GenerativeModel('gemini-1.5-flash')
-            prompt = f"请简明扼要地总结以下期权大单文章的核心信息，提炼最重要的交易数据：\n\n{article_text}"
-            # 异步调用模型
-            genai_resp = await asyncio.to_thread(model.generate_content, prompt)
-            summary = genai_resp.text
-    except Exception as e:
-        summary = f"网页获取或解析失败: {e}"
-
-    # 分发至指定频道
-    summary_ch = bot.get_channel(SUMMARY_CH_ID)
-    raw_link_ch = bot.get_channel(RAW_LINK_CH_ID)
-
-    if summary_ch:
-        embed = discord.Embed(title="📊 期权大单总结", description=summary, color=0x3498db)
-        embed.add_field(name="原文链接", value=target_url, inline=False)
-        await summary_ch.send(embed=embed)
-    
-    if raw_link_ch:
-        await raw_link_ch.send(target_url)
-
-    # 删除原消息
-    try:
-        await message.delete()
-    except Exception as e:
-        print(f"⚠️ 删除原消息失败 (检查Bot权限): {e}")
-
-    return True
-
-@bot.event
-async def on_message(message):
-    # 如果发出消息的是机器人自己，忽略
-    if message.author == bot.user:
-        return
-        
-    # 监听特定频道
-    if message.channel.id == SOURCE_CH_ID:
-        await process_option_message(message)
-
-    await bot.process_commands(message)
-
-@bot.command(name="测试")
-async def test_cmd(ctx):
-    """测试命令：从源频道扫描最近10条进行处理验证"""
-    if ctx.channel.id != SOURCE_CH_ID:
-        await ctx.send("请在源频道中发送 `/测试` 命令以进行验证。")
-        return
-        
-    await ctx.send("🔍 正在扫描此频道最近 10 条消息测试匹配逻辑...")
-    count = 0
-    async for msg in ctx.channel.history(limit=10):
-        if msg.id == ctx.message.id: 
-            continue
-        if await process_option_message(msg):
-            count += 1
-            
-    await ctx.send(f"✅ 测试结束，已成功匹配并处理了 {count} 条包含期权大单的消息。")
-
-# ==========================================
-# 🚀 整合原有任务循环 (转换为 Discord 异步任务)
-# ==========================================
-
-last_run_time_str = ""
-
-@tasks.loop(seconds=30)
-async def scheduled_legacy_tasks():
-    global last_run_time_str
-    try:
-        tz = pytz.timezone('US/Eastern')
-        now_et = datetime.now(tz)
-        current_str = now_et.strftime("%H:%M")
-        is_holiday, holiday_name = is_market_holiday(now_et)
-
-        if current_str != last_run_time_str:
-            print(f"⏰ {current_str} ET (Market Open: {not is_holiday})")
-            
-            if not is_holiday:
-                # 使用 to_thread 避免原本同步的 requests 阻塞 Discord Bot 的心跳
-                if current_str == BREADTH_SCHEDULE_TIME:
-                    print(f"🔔 触发 市场广度: {current_str}")
-                    await asyncio.to_thread(run_breadth_task)
-                    
-                if current_str == REDDIT_SCHEDULE_TIME:
-                    print(f"🔔 触发 Reddit 热度榜: {current_str}")
-                    await asyncio.to_thread(run_reddit_task)
-                    
-                if current_str in FEAR_SCHEDULE_TIMES:
-                    print(f"🔔 触发 恐慌贪婪指数: {current_str}")
-                    await asyncio.to_thread(run_fear_greed_task)
-                    
-            else:
-                all_times = [BREADTH_SCHEDULE_TIME, REDDIT_SCHEDULE_TIME] + FEAR_SCHEDULE_TIMES
-                if current_str in all_times:
-                    print(f"😴 今日休市 ({holiday_name})，跳过推送")
-
-            last_run_time_str = current_str
-
-    except Exception as e:
-        print(f"⚠️ 调度循环报错: {e}")
-
-@bot.event
-async def on_ready():
-    print(f"🤖 Bot 已登录: {bot.user}")
-    print("-------------- 系统自检 --------------")
-    # 为了防止启动时自检卡住Bot登录流程，可选择不自检或放入to_thread
-    print("✅ 系统正常运行，定时监听任务开始...")
-    print("--------------------------------------")
-    scheduled_legacy_tasks.start()
-
 if __name__ == "__main__":
-    if not DISCORD_TOKEN:
-        print("❌ 缺少 DISCORD_BOT_TOKEN 环境变量，无法启动 Bot 模式。")
-    else:
-        bot.run(DISCORD_TOKEN)
+    print("🚀 监控服务已启动")
+    
+    # --- 启动自检 (测试模式) ---
+    print("-------------- 系统自检 --------------")
+
+    print("🧪 [测试] 市场广度...")
+    run_breadth_task()
+    
+    print("🧪 [测试] Reddit 热度榜...")
+    run_reddit_task()
+    
+    print("🧪 [测试] 恐慌贪婪指数...")
+    run_fear_greed_task()
+    
+    print("✅ 自检结束，进入定时监听模式...")
+    print("--------------------------------------")
+
+    last_run_time_str = ""
+    
+    while True:
+        try:
+            tz = pytz.timezone('US/Eastern')
+            now_et = datetime.now(tz)
+            current_str = now_et.strftime("%H:%M")
+            is_holiday, holiday_name = is_market_holiday(now_et)
+
+            if current_str != last_run_time_str:
+                print(f"⏰ {current_str} ET (Market Open: {not is_holiday})")
+                
+                # 只有在非假期/非周末时才推送
+                if not is_holiday:
+                    # 1. Market Breadth
+                    if current_str == BREADTH_SCHEDULE_TIME:
+                        print(f"🔔 触发 市场广度: {current_str}")
+                        run_breadth_task()
+                        
+                    # 2. Reddit Trending
+                    if current_str == REDDIT_SCHEDULE_TIME:
+                        print(f"🔔 触发 Reddit 热度榜: {current_str}")
+                        run_reddit_task()
+                        
+                    # 3. CNN Fear & Greed
+                    if current_str in FEAR_SCHEDULE_TIMES:
+                        print(f"🔔 触发 恐慌贪婪指数: {current_str}")
+                        run_fear_greed_task()
+                        
+                else:
+                    # 假期/周末时，只打印心跳
+                    all_times = [BREADTH_SCHEDULE_TIME, REDDIT_SCHEDULE_TIME] + FEAR_SCHEDULE_TIMES
+                    if current_str in all_times:
+                        print(f"😴 今日休市 ({holiday_name})，跳过推送")
+
+                last_run_time_str = current_str
+        
+        except Exception as e:
+            print(f"⚠️ 主循环报错: {e}")
+            time.sleep(5)
+            
+        time.sleep(30)
