@@ -6,6 +6,3 @@ pandas
 lxml
 matplotlib
 fear-and-greed
-discord.py
-google-generativeai
-beautifulsoup4
