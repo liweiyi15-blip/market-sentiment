@@ -6,3 +6,4 @@ pandas
 lxml
 matplotlib
 fear-and-greed
+tzdata
