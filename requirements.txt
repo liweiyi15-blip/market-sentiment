@@ -1,9 +1,4 @@
 requests
-pytz
 holidays
-yfinance
-pandas
-lxml
-matplotlib
 fear-and-greed
 tzdata

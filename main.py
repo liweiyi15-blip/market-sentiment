@@ -14,14 +14,15 @@ from state import State, state_path
 def execute(occurrence, path):
     from delivery import Delivery
     import tasks
+    functions = {"fear": tasks.run_fear_greed_task, "reddit": tasks.run_reddit_task}
+    if occurrence.job not in functions:
+        raise ValueError(f"Unsupported report job: {occurrence.job}")
     state = State(path)
     try:
         if not state.claim(occurrence.key):
             print(f"SKIP already handled: {occurrence.key}", flush=True)
             return 0
         sender = Delivery(state, occurrence.key)
-        functions = {"fear": tasks.run_fear_greed_task,
-                     "breadth": tasks.run_breadth_task, "reddit": tasks.run_reddit_task}
         kwargs = {"previous_value": state.get("previous_fear_value")} if occurrence.job == "fear" else {}
         functions[occurrence.job](sender, **kwargs)
         if state.run(occurrence.key)["status"] != "sent":
@@ -72,8 +73,8 @@ def run_scheduled(path, *, clock=None, sleep=time.sleep, launch=subprocess.run):
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--dry-run", action="store_true", help="Read data without posting or writing state")
-    parser.add_argument("--job", choices=("fear", "reddit", "breadth"), help="Preview a report; requires --dry-run")
-    parser.add_argument("--execute", choices=("fear", "reddit", "breadth"), help=argparse.SUPPRESS)
+    parser.add_argument("--job", choices=("fear", "reddit"), help="Preview a report; requires --dry-run")
+    parser.add_argument("--execute", choices=("fear", "reddit"), help=argparse.SUPPRESS)
     parser.add_argument("--at", help=argparse.SUPPRESS)
     parser.add_argument("--state", type=Path, help=argparse.SUPPRESS)
     args = parser.parse_args(argv)
@@ -83,8 +84,7 @@ def main(argv=None):
         if args.job:
             from delivery import preview
             import tasks
-            {"fear": tasks.run_fear_greed_task, "reddit": tasks.run_reddit_task,
-             "breadth": tasks.run_breadth_task}[args.job](preview)
+            {"fear": tasks.run_fear_greed_task, "reddit": tasks.run_reddit_task}[args.job](preview)
         else:
             for slot in candidates(datetime.now(timezone.utc)):
                 print(f"DRY_RUN {slot.key}")

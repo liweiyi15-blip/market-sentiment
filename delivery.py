@@ -7,16 +7,12 @@ class Delivery:
     def __init__(self, state, key):
         self.state, self.key = state, key
 
-    def __call__(self, payload, *, files=None, state_updates=None):
+    def __call__(self, payload, *, state_updates=None):
         import requests
         url = os.environ.get("WEBHOOK_URL")
         if not url:
             raise RuntimeError("WEBHOOK_URL is missing")
-        options = {"params": {"wait": "true"}, "timeout": (10, 40)}
-        if files:
-            options.update(data={"payload_json": json.dumps(payload)}, files=files)
-        else:
-            options["json"] = payload
+        options = {"params": {"wait": "true"}, "timeout": (10, 40), "json": payload}
         self.state.before_send(self.key)
         try:
             response = requests.post(url, **options)
@@ -37,7 +33,6 @@ class Delivery:
         print(f"DELIVERED {self.key}", flush=True)
 
 
-def preview(payload, *, files=None, state_updates=None):
+def preview(payload, *, state_updates=None):
     print(json.dumps({"dry_run": True, "payload": payload,
-                      "attachments": list((files or {}).keys()),
                       "state_updates": state_updates or {}}, ensure_ascii=False), flush=True)

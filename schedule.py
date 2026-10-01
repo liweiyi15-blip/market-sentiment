@@ -6,7 +6,7 @@ from zoneinfo import ZoneInfo
 
 EASTERN = ZoneInfo("America/New_York")
 SLOTS = (("fear", "09:45"), ("fear", "11:45"), ("fear", "13:45"),
-         ("fear", "15:45"), ("breadth", "16:30"), ("reddit", "16:42"))
+         ("fear", "15:45"), ("reddit", "16:42"))
 GRACE = timedelta(minutes=15)
 JOB_TIMEOUT_SECONDS = 480
 

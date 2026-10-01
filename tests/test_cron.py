@@ -13,7 +13,7 @@ from unittest.mock import Mock, patch
 import requests
 
 from delivery import Delivery
-from main import execute, run_scheduled
+from main import execute, main, run_scheduled
 from schedule import EASTERN, Occurrence, candidates
 from state import State, state_path
 
@@ -41,6 +41,15 @@ class ScheduleTests(unittest.TestCase):
             "import main,tasks,sys; assert not any(x in sys.modules for x in "
             "('pandas','matplotlib','yfinance','fear_and_greed'))"], timeout=15)
         self.assertEqual(result.returncode, 0)
+
+    def test_former_breadth_slot_is_idle_in_standard_and_daylight_time(self):
+        for day in ((2026, 3, 6), (2026, 3, 9), (2026, 11, 2)):
+            for minute in (30, 35):
+                with self.subTest(day=day, minute=minute):
+                    self.assertEqual(candidates(datetime(*day, 16, minute, tzinfo=EASTERN)), [])
+            slots = candidates(datetime(*day, 16, 40, tzinfo=EASTERN))
+            self.assertEqual([(slot.job, slot.at.strftime("%H:%M")) for slot in slots],
+                             [("reddit", "16:42")])
 
 
 class StateAndDeliveryTests(unittest.TestCase):
@@ -72,6 +81,7 @@ class StateAndDeliveryTests(unittest.TestCase):
             self.assertEqual(post.call_count, 1)
             self.assertEqual(post.call_args.kwargs["params"], {"wait": "true"})
             self.assertEqual(post.call_args.kwargs["timeout"], (10, 40))
+            self.assertEqual(post.call_args.kwargs["json"], {"embeds": []})
         self.state.close()
         self.state = State(self.path)
         self.assertEqual(self.state.get("previous_fear_value"), 42.1)
@@ -120,7 +130,72 @@ class StateAndDeliveryTests(unittest.TestCase):
 
 
 class RunnerTests(unittest.TestCase):
-    def test_full_day_restarts_keep_all_six_slots_without_extra_posts(self):
+    def test_removed_job_is_rejected_before_opening_state_or_delivering(self):
+        slot = Occurrence("breadth", datetime(2026, 9, 10, 16, 30, tzinfo=EASTERN))
+        with patch("main.State") as state, patch("requests.post") as post:
+            with self.assertRaisesRegex(ValueError, "Unsupported report job"):
+                execute(slot, Path("unused.sqlite3"))
+        state.assert_not_called()
+        post.assert_not_called()
+
+    def test_removed_job_cli_arguments_are_rejected_without_side_effects(self):
+        for args in (("--dry-run", "--job", "breadth"), ("--execute", "breadth")):
+            with self.subTest(args=args), patch("main.State") as state, \
+                 patch("requests.post") as post, contextlib.redirect_stderr(io.StringIO()):
+                with self.assertRaises(SystemExit) as exc:
+                    main(args)
+                self.assertEqual(exc.exception.code, 2)
+                state.assert_not_called()
+                post.assert_not_called()
+
+    def test_old_breadth_records_do_not_restart_jobs_or_erase_shared_state(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp)/"state.sqlite3"
+            stamp = datetime(2026, 9, 10, 16, 30, tzinfo=EASTERN)
+            breadth_key = Occurrence("breadth", stamp).key
+            fear_key = "2026-09-10:15:45:fear"
+            state = State(path)
+            try:
+                state.claim(breadth_key)
+                state.fail(breadth_key, "Source unavailable")
+                state.claim(fear_key)
+                state.before_send(fear_key)
+                state.sent(fear_key, "fake-fear", {"previous_fear_value": 42.1})
+                before = [tuple(row) for row in state.db.execute("SELECT * FROM runs ORDER BY id")]
+            finally:
+                state.close()
+            launch = Mock()
+            self.assertEqual(run_scheduled(path, clock=lambda: stamp, launch=launch), 0)
+            launch.assert_not_called()
+            state = State(path)
+            try:
+                self.assertEqual([tuple(row) for row in state.db.execute("SELECT * FROM runs ORDER BY id")], before)
+                self.assertEqual(state.get("previous_fear_value"), 42.1)
+            finally:
+                state.close()
+
+    def test_retained_jobs_execute_and_confirm_delivery(self):
+        for job, hour, minute in (("fear", 9, 45), ("reddit", 16, 42)):
+            with self.subTest(job=job), tempfile.TemporaryDirectory() as tmp:
+                path = Path(tmp)/"state.sqlite3"
+                slot = Occurrence(job, datetime(2026, 9, 10, hour, minute, tzinfo=EASTERN))
+                response = SimpleNamespace(status_code=200, content=b'{}', json=lambda: {"id": "fake"})
+                with patch.dict(os.environ, {"WEBHOOK_URL": "https://example.invalid/test-webhook"}), \
+                     patch("requests.post", return_value=response) as post, \
+                     patch("fear_and_greed.get", return_value=SimpleNamespace(value=48.5, description="neutral")), \
+                     patch("tasks.get_apewisdom_data", return_value=[
+                         {"rank": 1, "ticker": "AAA", "name": "Test", "mentions": 123, "rank_24h_ago": 3}]):
+                    self.assertEqual(execute(slot, path), 0)
+                    self.assertEqual(execute(slot, path), 0)
+                    post.assert_called_once()
+                state = State(path)
+                try:
+                    self.assertEqual(state.run(slot.key)["status"], "sent")
+                    self.assertEqual(state.get("previous_fear_value"), 48.5 if job == "fear" else None)
+                finally:
+                    state.close()
+
+    def test_full_day_restarts_keep_all_five_slots_without_extra_posts(self):
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp)/"state.sqlite3"
             sent = []
@@ -148,7 +223,7 @@ class RunnerTests(unittest.TestCase):
                     current[0] = datetime(2026, 9, 10, minute//60, minute%60, 35, tzinfo=EASTERN)
                     self.assertEqual(run_scheduled(path, clock=lambda: current[0], sleep=sleep, launch=launch), 0)
             self.assertEqual(sent, [("fear", "09:45"), ("fear", "11:45"), ("fear", "13:45"),
-                                    ("fear", "15:45"), ("breadth", "16:30"), ("reddit", "16:42")])
+                                    ("fear", "15:45"), ("reddit", "16:42")])
 
     def test_timeout_exits_and_releases_claim_for_a_later_retry(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -202,27 +277,6 @@ class ReportTests(unittest.TestCase):
         self.assertIn("**$AAA**", desc)
         self.assertIn("`123`", desc)
 
-    def test_breadth_renders_png_and_preserves_calculation(self):
-        import pandas as pd
-        import tasks
-        index = pd.date_range("2026-01-01", periods=120, freq="B", tz="America/New_York")
-        prices = pd.DataFrame({("Close", "UP"): range(1, 121),
-                               ("Close", "DOWN"): range(120, 0, -1)}, index=index)
-        sender = Mock()
-
-        def inspect_payload(payload, **kwargs):
-            self.assertIn("`50.0%`", payload["embeds"][0]["description"])
-            buffer = kwargs["files"]["file"][1]
-            self.assertTrue(buffer.getvalue().startswith(b"\x89PNG"))
-            self.assertGreater(len(buffer.getvalue()), 10000)
-
-        sender.side_effect = inspect_payload
-        with patch("requests.get", return_value=SimpleNamespace(text="unused", raise_for_status=lambda: None)), \
-             patch("pandas.read_html", return_value=[pd.DataFrame({"Symbol": ["UP", "DOWN"]})]), \
-             patch("yfinance.download", return_value=prices):
-            tasks.run_breadth_task(sender)
-        self.assertEqual(sender.call_count, 1)
-        self.assertTrue(sender.call_args.kwargs["files"]["file"][1].closed)
 
 
 if __name__ == "__main__":

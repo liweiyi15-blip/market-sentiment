@@ -2,14 +2,19 @@
 
 Railway starts a short cron process every five minutes on weekdays from 13:00 to
 22:55 UTC. The process exits immediately when no report is due. Expensive report
-generation runs in a child process with an eight-minute timeout, so plotting and
-historical price data do not occupy RAM between reports.
+generation runs in a child process with an eight-minute timeout, so report work
+does not occupy RAM between reports.
 
 The report times remain in `America/New_York`: CNN Fear & Greed at 09:45, 11:45,
-13:45, and 15:45; market breadth at 16:30; Reddit at 16:42. The runner accounts for
+13:45, and 15:45; Reddit at 16:42. The runner accounts for
 daylight saving time and NYSE holidays. It can briefly wait inside its current
 five-minute window for 16:42 and accepts starts up to fifteen minutes late.
 Railway cron may itself start a few minutes late.
+
+The S&P 500 market breadth / 20-day and 50-day participation report has been
+removed, including its 16:30 slot, manual job options, chart generation and image
+upload path. The change takes effect only after deploying this revision; pushing
+an unmerged development branch does not stop an older production revision.
 
 ## Deployment
 
@@ -47,6 +52,43 @@ The pre-migration source commit is `a325dbd6c2b53beb44dc60ac780bcbdf11df1283`.
 If reverting, remove the cron schedule, restore the former start/restart settings,
 and deploy that revision. Its old startup self-test sends three messages; perform
 any rollback with awareness of that behavior. Keep the state volume for recovery.
+
+## Retired breadth data
+
+No production cleanup or database migration runs as part of this change. No
+tracked price datasets or chart files exist in this revision: the former report
+calculated prices in memory and uploaded a PNG from an in-memory buffer.
+
+- The shared delivery journal is `sentiment.sqlite3` under
+  `MARKET_SENTIMENT_STATE_DIR`, otherwise `RAILWAY_VOLUME_MOUNT_PATH`, otherwise
+  `.state` in the working directory. With the documented `/data` mount and no
+  directory override, this is `/data/sentiment.sqlite3`.
+- Only rows in `runs` whose `id` ends in `:breadth` belong to the retired report
+  (normally `YYYY-MM-DD:16:30:breadth`). A read-only inventory is
+  `SELECT id, status, updated FROM runs WHERE id LIKE '%:breadth';`.
+  Leave the database, all other run rows, and the `state` table intact, especially
+  `previous_fear_value`. Breadth wrote no entries to the `state` table. Existing
+  retention removes run records older than 35 days when the journal is opened;
+  this policy is unchanged. Deleting delivery records loses the original audit
+  and deduplication history unless a backup exists, and can allow an old revision
+  to resend a recently deleted slot if rolled back.
+- Potential regenerable caches from the retired libraries are the old working
+  directory's `yfinance.cache`, the runtime user's cache directory's
+  `py-yfinance/`, and Matplotlib's dedicated cache directory. On a default Linux
+  root-user container these are `/app/yfinance.cache`,
+  `/root/.cache/py-yfinance/` and `/root/.cache/matplotlib/`; environment overrides
+  (`XDG_CACHE_HOME`, `MPLCONFIGDIR`) or a different runtime user change the paths.
+  Presence and exclusive ownership must be checked before any later cleanup.
+  Do not delete a shared cache root or inspect Yahoo cookie-cache contents.
+  These paths are candidates inferred from code/library defaults, not a verified
+  inventory of production storage. Removed dependencies disappear from new
+  images when rebuilt; do not uninstall packages in a running production service.
+- Existing Discord messages and attachments are outside this cleanup scope.
+  They are not deleted by the code change. No webhook or shared volume should be
+  removed: CNN and Reddit still use them.
+
+Source removal is reversible through Git history. No irreversible production
+data deletion is included in this change.
 
 References: [Railway cron](https://docs.railway.com/cron-jobs),
 [configuration precedence](https://docs.railway.com/config-as-code/reference),
