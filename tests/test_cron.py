@@ -20,20 +20,20 @@ from state import State, state_path
 
 class ScheduleTests(unittest.TestCase):
     def test_dst_keeps_the_same_eastern_slots(self):
-        for stamp in ("2026-03-06T14:45:40+00:00", "2026-03-09T13:45:40+00:00",
-                      "2026-10-30T13:45:40+00:00", "2026-11-02T14:45:40+00:00"):
+        for stamp in ("2026-03-06T21:42:40+00:00", "2026-03-09T20:42:40+00:00",
+                      "2026-10-30T20:42:40+00:00", "2026-11-02T21:42:40+00:00"):
             slots = candidates(datetime.fromisoformat(stamp))
-            self.assertEqual([(x.job, x.at.strftime("%H:%M")) for x in slots], [("fear", "09:45")])
+            self.assertEqual([(x.job, x.at.strftime("%H:%M")) for x in slots], [("reddit", "16:42")])
 
     def test_exchange_holidays_and_weekends(self):
         for day in ("2026-04-03", "2026-11-26", "2026-09-12", "2026-09-07"):
-            self.assertEqual(candidates(datetime.fromisoformat(day+"T09:45").replace(tzinfo=EASTERN)), [])
+            self.assertEqual(candidates(datetime.fromisoformat(day+"T16:42").replace(tzinfo=EASTERN)), [])
         # Columbus Day is a federal holiday, but the stock exchange is open.
-        self.assertEqual(len(candidates(datetime(2026, 10, 12, 9, 45, tzinfo=EASTERN))), 1)
+        self.assertEqual(len(candidates(datetime(2026, 10, 12, 16, 42, tzinfo=EASTERN))), 1)
 
     def test_late_start_grace_and_no_unlimited_catch_up(self):
-        self.assertEqual(len(candidates(datetime(2026, 9, 10, 9, 53, tzinfo=EASTERN))), 1)
-        self.assertEqual(candidates(datetime(2026, 9, 10, 10, 1, tzinfo=EASTERN)), [])
+        self.assertEqual(len(candidates(datetime(2026, 9, 10, 16, 53, tzinfo=EASTERN))), 1)
+        self.assertEqual(candidates(datetime(2026, 9, 10, 17, 1, tzinfo=EASTERN)), [])
         self.assertEqual(candidates(datetime(2026, 9, 10, 8, 0, tzinfo=EASTERN)), [])
 
     def test_idle_runner_does_not_import_heavy_report_libraries(self):
@@ -41,6 +41,13 @@ class ScheduleTests(unittest.TestCase):
             "import main,tasks,sys; assert not any(x in sys.modules for x in "
             "('pandas','matplotlib','yfinance','fear_and_greed'))"], timeout=15)
         self.assertEqual(result.returncode, 0)
+
+    def test_former_cnn_slots_are_idle_in_standard_and_daylight_time(self):
+        for day in ((2026, 3, 6), (2026, 3, 9), (2026, 11, 2)):
+            for hour in (9, 11, 13, 15):
+                for minute in (40, 45, 50, 55):
+                    with self.subTest(day=day, hour=hour, minute=minute):
+                        self.assertEqual(candidates(datetime(*day, hour, minute, tzinfo=EASTERN)), [])
 
     def test_former_breadth_slot_is_idle_in_standard_and_daylight_time(self):
         for day in ((2026, 3, 6), (2026, 3, 9), (2026, 11, 2)):
@@ -57,7 +64,7 @@ class StateAndDeliveryTests(unittest.TestCase):
         self.tmp = tempfile.TemporaryDirectory()
         self.path = Path(self.tmp.name)/"state.sqlite3"
         self.state = State(self.path)
-        self.key = "2026-09-10:09:45:fear"
+        self.key = "2026-09-10:16:42:reddit"
         self.env = patch.dict(os.environ, {"WEBHOOK_URL": "https://example.invalid/test-webhook"})
         self.env.start()
 
@@ -66,7 +73,7 @@ class StateAndDeliveryTests(unittest.TestCase):
         self.state.close()
         self.tmp.cleanup()
 
-    def test_delivery_is_deduplicated_across_restart_and_value_persists(self):
+    def test_delivery_is_deduplicated_across_restart_and_state_persists(self):
         self.assertTrue(self.state.claim(self.key))
         second = State(self.path)
         try:
@@ -75,7 +82,7 @@ class StateAndDeliveryTests(unittest.TestCase):
             second.close()
         response = SimpleNamespace(status_code=200, content=b'{}', json=lambda: {"id": "message-1"})
         with patch("requests.post", return_value=response) as post:
-            Delivery(self.state, self.key)({"embeds": []}, state_updates={"previous_fear_value": 42.1})
+            Delivery(self.state, self.key)({"embeds": []}, state_updates={"test_value": 42.1})
             with self.assertRaises(RuntimeError):
                 Delivery(self.state, self.key)({"embeds": []})
             self.assertEqual(post.call_count, 1)
@@ -84,15 +91,15 @@ class StateAndDeliveryTests(unittest.TestCase):
             self.assertEqual(post.call_args.kwargs["json"], {"embeds": []})
         self.state.close()
         self.state = State(self.path)
-        self.assertEqual(self.state.get("previous_fear_value"), 42.1)
+        self.assertEqual(self.state.get("test_value"), 42.1)
         self.assertFalse(self.state.claim(self.key))
 
-    def test_http_rejection_is_retryable_and_does_not_advance_comparison(self):
+    def test_http_rejection_is_retryable_and_does_not_update_state(self):
         self.state.claim(self.key)
         with patch("requests.post", return_value=SimpleNamespace(status_code=429)):
             with self.assertRaises(RuntimeError):
-                Delivery(self.state, self.key)({}, state_updates={"previous_fear_value": 50})
-        self.assertIsNone(self.state.get("previous_fear_value"))
+                Delivery(self.state, self.key)({}, state_updates={"test_value": 50})
+        self.assertIsNone(self.state.get("test_value"))
         self.assertTrue(self.state.claim(self.key))
 
     def test_lost_response_is_not_resent(self):
@@ -131,24 +138,32 @@ class StateAndDeliveryTests(unittest.TestCase):
 
 class RunnerTests(unittest.TestCase):
     def test_removed_job_is_rejected_before_opening_state_or_delivering(self):
-        slot = Occurrence("breadth", datetime(2026, 9, 10, 16, 30, tzinfo=EASTERN))
-        with patch("main.State") as state, patch("requests.post") as post:
-            with self.assertRaisesRegex(ValueError, "Unsupported report job"):
-                execute(slot, Path("unused.sqlite3"))
-        state.assert_not_called()
-        post.assert_not_called()
+        for job in ("breadth", "fear"):
+            with self.subTest(job=job):
+                slot = Occurrence(job, datetime(2026, 9, 10, 15, 45, tzinfo=EASTERN))
+                with patch("main.State") as state, patch("requests.post") as post, \
+                     patch("requests.get") as get:
+                    with self.assertRaisesRegex(ValueError, "Unsupported report job"):
+                        execute(slot, Path("unused.sqlite3"))
+                state.assert_not_called()
+                post.assert_not_called()
+                get.assert_not_called()
 
     def test_removed_job_cli_arguments_are_rejected_without_side_effects(self):
-        for args in (("--dry-run", "--job", "breadth"), ("--execute", "breadth")):
+        for args in (("--dry-run", "--job", "breadth"), ("--execute", "breadth"),
+                     ("--dry-run", "--job", "fear"), ("--execute", "fear")):
             with self.subTest(args=args), patch("main.State") as state, \
-                 patch("requests.post") as post, contextlib.redirect_stderr(io.StringIO()):
+                 patch("requests.post") as post, patch("requests.get") as get, \
+                 patch("main.state_path") as path, contextlib.redirect_stderr(io.StringIO()):
                 with self.assertRaises(SystemExit) as exc:
                     main(args)
                 self.assertEqual(exc.exception.code, 2)
                 state.assert_not_called()
                 post.assert_not_called()
+                get.assert_not_called()
+                path.assert_not_called()
 
-    def test_old_breadth_records_do_not_restart_jobs_or_erase_shared_state(self):
+    def test_retired_records_do_not_restart_jobs_or_erase_shared_state(self):
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp)/"state.sqlite3"
             stamp = datetime(2026, 9, 10, 16, 30, tzinfo=EASTERN)
@@ -165,7 +180,9 @@ class RunnerTests(unittest.TestCase):
             finally:
                 state.close()
             launch = Mock()
-            self.assertEqual(run_scheduled(path, clock=lambda: stamp, launch=launch), 0)
+            for hour, minute in ((9, 45), (11, 45), (13, 45), (15, 45), (16, 30)):
+                now = stamp.replace(hour=hour, minute=minute)
+                self.assertEqual(run_scheduled(path, clock=lambda: now, launch=launch), 0)
             launch.assert_not_called()
             state = State(path)
             try:
@@ -175,14 +192,13 @@ class RunnerTests(unittest.TestCase):
                 state.close()
 
     def test_retained_jobs_execute_and_confirm_delivery(self):
-        for job, hour, minute in (("fear", 9, 45), ("reddit", 16, 42)):
+        for job, hour, minute in (("reddit", 16, 42),):
             with self.subTest(job=job), tempfile.TemporaryDirectory() as tmp:
                 path = Path(tmp)/"state.sqlite3"
                 slot = Occurrence(job, datetime(2026, 9, 10, hour, minute, tzinfo=EASTERN))
                 response = SimpleNamespace(status_code=200, content=b'{}', json=lambda: {"id": "fake"})
                 with patch.dict(os.environ, {"WEBHOOK_URL": "https://example.invalid/test-webhook"}), \
                      patch("requests.post", return_value=response) as post, \
-                     patch("fear_and_greed.get", return_value=SimpleNamespace(value=48.5, description="neutral")), \
                      patch("tasks.get_apewisdom_data", return_value=[
                          {"rank": 1, "ticker": "AAA", "name": "Test", "mentions": 123, "rank_24h_ago": 3}]):
                     self.assertEqual(execute(slot, path), 0)
@@ -191,11 +207,10 @@ class RunnerTests(unittest.TestCase):
                 state = State(path)
                 try:
                     self.assertEqual(state.run(slot.key)["status"], "sent")
-                    self.assertEqual(state.get("previous_fear_value"), 48.5 if job == "fear" else None)
                 finally:
                     state.close()
 
-    def test_full_day_restarts_keep_all_five_slots_without_extra_posts(self):
+    def test_full_day_restarts_keep_only_reddit_without_extra_posts(self):
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp)/"state.sqlite3"
             sent = []
@@ -222,14 +237,13 @@ class RunnerTests(unittest.TestCase):
                 for minute in range(8*60, 18*60, 5):
                     current[0] = datetime(2026, 9, 10, minute//60, minute%60, 35, tzinfo=EASTERN)
                     self.assertEqual(run_scheduled(path, clock=lambda: current[0], sleep=sleep, launch=launch), 0)
-            self.assertEqual(sent, [("fear", "09:45"), ("fear", "11:45"), ("fear", "13:45"),
-                                    ("fear", "15:45"), ("reddit", "16:42")])
+            self.assertEqual(sent, [("reddit", "16:42")])
 
     def test_timeout_exits_and_releases_claim_for_a_later_retry(self):
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp)/"state.sqlite3"
-            stamp = datetime(2026, 9, 10, 9, 45, tzinfo=EASTERN)
-            key = Occurrence("fear", stamp).key
+            stamp = datetime(2026, 9, 10, 16, 42, tzinfo=EASTERN)
+            key = Occurrence("reddit", stamp).key
 
             def launch(args, **kwargs):
                 state = State(path)
@@ -257,15 +271,6 @@ class RunnerTests(unittest.TestCase):
 
 
 class ReportTests(unittest.TestCase):
-    def test_fear_report_preserves_previous_value_comparison(self):
-        import tasks
-        sender = Mock()
-        with patch("fear_and_greed.get", return_value=SimpleNamespace(value=48.5, description="neutral")):
-            tasks.run_fear_greed_task(sender, previous_value=42.0)
-        payload = sender.call_args.args[0]
-        self.assertIn("升高了 6.5", payload["embeds"][0]["description"])
-        self.assertEqual(sender.call_args.kwargs["state_updates"], {"previous_fear_value": 48.5})
-
     def test_reddit_report_keeps_ranking_and_mentions(self):
         import tasks
         sender = Mock()

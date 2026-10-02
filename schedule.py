@@ -5,8 +5,7 @@ from functools import lru_cache
 from zoneinfo import ZoneInfo
 
 EASTERN = ZoneInfo("America/New_York")
-SLOTS = (("fear", "09:45"), ("fear", "11:45"), ("fear", "13:45"),
-         ("fear", "15:45"), ("reddit", "16:42"))
+SLOTS = (("reddit", "16:42"),)
 GRACE = timedelta(minutes=15)
 JOB_TIMEOUT_SECONDS = 480
 

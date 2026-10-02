@@ -1,4 +1,4 @@
-"""Confirm Discord delivery before persisting the next comparison value."""
+"""Confirm Discord delivery before persisting the delivery record."""
 import json
 import os
 

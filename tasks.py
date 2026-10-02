@@ -18,10 +18,6 @@ import requests
 REDDIT_BOT_NAME = "Stocksera 舆情热度"
 REDDIT_BOT_AVATAR = "https://i.imgur.com/8Qj5X9A.png"
 
-# Fear & Greed Bot
-FEAR_BOT_NAME = "CNN 恐慌贪婪指数"
-FEAR_BOT_AVATAR = "https://i.imgur.com/Segc5PF.jpeg" 
-
 # ==========================================
 # 🛠️ 辅助函数: 计算排名变化
 # ==========================================
@@ -131,60 +127,3 @@ def run_reddit_task(send):
         raise
         
     gc.collect()
-
-# ==========================================
-# 🟠 模块 2: CNN 恐慌贪婪指数
-# ==========================================
-def run_fear_greed_task(send, previous_value=None):
-    import fear_and_greed
-    print("📊 启动恐慌贪婪指数抓取...")
-
-    try:
-        fg = fear_and_greed.get()
-        current_value = round(fg.value, 1)
-        
-        # 将API获取的描述强制转为小写并去除空格
-        stage_desc = str(fg.description).strip().lower()
-
-        # 翻译阶段描述，并加上官方的数值区间
-        stage_map = {
-            "extreme greed": "极度贪婪 (76-100)",
-            "greed": "贪婪 (56-75)",
-            "neutral": "中性 (45-55)",
-            "fear": "恐慌 (25-44)",
-            "extreme fear": "极度恐慌 (0-24)"
-        }
-        stage_cn = stage_map.get(stage_desc, stage_desc)
-
-        # 计算并格式化变动 (使用文本箭头，无emoji)
-        change_text = "初始化 (无对比数据)"
-        if previous_value is not None:
-            diff = current_value - previous_value
-            if diff > 0:
-                change_text = f"→ 升高了 {diff:.1f}"
-            elif diff < 0:
-                change_text = f"→ 降低了 {abs(diff):.1f}"
-            else:
-                change_text = "→ 保持不变"
-
-
-        # 构建Embed排版 (纯文本排版，无图表)
-        payload = {
-            "username": FEAR_BOT_NAME,
-            "avatar_url": FEAR_BOT_AVATAR,
-            "embeds": [{
-                "title": "CNN 市场情绪监测",
-                "description": f"**当前情绪:** {stage_cn}\n"
-                               f"**当前数值:** `{current_value}`\n"
-                               f"**环比上一期:** {change_text}",
-                "color": 0x9B59B6
-            }]
-        }
-
-        send(payload, state_updates={"previous_fear_value": current_value})
-        print("✅ 恐慌贪婪指数报告处理完成")
-
-    except Exception as e:
-        print(f"❌ 获取恐慌贪婪指数失败: {e}")
-        raise
-
